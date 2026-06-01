@@ -1,12 +1,14 @@
 import express, { Request, Response } from 'express';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
-import { supabaseAdmin } from './lib/supabase';
-import { openai } from './lib/openai';
-import * as EngineModule from './executeSimoraCoreEngine'; // 👈 Bulletproof: Imports everything from the file
+
+// 🎯 EXACT ROADMAP PATHS BASED ON YOUR GITHUB SCREENSHOT
+import { supabaseAdmin } from './supabase'; 
+import { openai } from './openai'; 
+import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine'; 
 
 // ============================================================================
-// 1. CONFIGURATION
+// CONFIGURATION & QUEUES
 // ============================================================================
 const PORT = process.env.PORT || 3000;
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
@@ -16,9 +18,6 @@ const REDIS_CONNECTION = {
   password: process.env.REDIS_PASSWORD,
 };
 
-// ============================================================================
-// 2. TYPESCRIPT INTERFACES
-// ============================================================================
 interface WhatsAppMessageContext {
   from: string;
   text?: string;
@@ -28,37 +27,23 @@ interface WhatsAppMessageContext {
 
 interface HydrationPayload {
   user_id: string;
-  system_metadata: {
-    geography_code: string;
-    industry_taxonomy_id: string;
-    assigned_operational_landscape: string;
-  };
   financial_hydration_payload: {
-    provider_gateway: string;
     account_balance_current: number;
-    currency_type: string;
     monthly_operating_burn_rate: number;
     calculated_system_runway_months: number;
   };
-  ingested_vector_chunks: Array<{
-    chunk_id: string;
-    text_content: string;
-    embedding_vector_dimensions: number;
-  }>;
+  ingested_vector_chunks: Array<{ chunk_id: string; text_content: string }>;
 }
 
-// ============================================================================
-// 3. BACKGROUND QUEUES (BULLMQ)
-// ============================================================================
 const whatsappQueue = new Queue('WhatsAppStateTransition', { connection: REDIS_CONNECTION });
 const hydrationQueue = new Queue('DataHydrationIngestion', { connection: REDIS_CONNECTION });
 
-// ============================================================================
-// 4. EXPRESS ROUTER & WEBHOOKS
-// ============================================================================
 const app = express();
 app.use(express.json());
 
+// ============================================================================
+// WEBHOOK ROUTES
+// ============================================================================
 app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
   try {
     const entry = req.body.entry?.[0];
@@ -73,7 +58,6 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
         interactive_reply_id: message.type === 'interactive' ? message.interactive.button_reply.id : undefined,
         audio_id: message.type === 'audio' ? message.audio.id : undefined,
       };
-
       await whatsappQueue.add('ProcessWhatsAppMessage', payload, {
         attempts: 3,
         backoff: { type: 'exponential', delay: 1000 },
@@ -90,12 +74,10 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
 app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) => {
   try {
     const payload = req.body as HydrationPayload;
-
     if (!payload.user_id || !payload.financial_hydration_payload) {
        res.status(400).json({ error: 'Malformed Hydration Payload Structure' });
        return;
     }
-
     await hydrationQueue.add('ProcessLedgerSync', payload);
     res.status(200).json({ status: 'SYNC_QUEUED', timestamp: new Date().toISOString() });
     return;
@@ -106,7 +88,7 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
 });
 
 // ============================================================================
-// 5. TESTING ENDPOINT (SAFE SANDBOX)
+// THE TESTING ENDPOINT (RESOLVING THE 3 ARGUMENT GATE)
 // ============================================================================
 app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
   try {
@@ -117,29 +99,19 @@ app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
       return;
     }
 
-    console.log(`[TEST ROUTE] Safely spinning up engine for UUID: ${userId}`);
+    console.log(`[TEST ROUTE] Spinning up engine for UUID: ${userId}`);
     
-    // 💥 BYPASSES EXPORT MISMATCHES: Checks for both named and default exports automatically
-    const engineFunc = (EngineModule as any).executeSimoraCoreEngine || (EngineModule as any).default;
-    
-    if (typeof engineFunc !== 'function') {
-      throw new Error("Could not locate a valid function export inside executeSimoraCoreEngine.ts");
-    }
-
-    // 💥 BYPASSES TYPE STRICTNESS: Feeds the clients using 'as any' so the compiler doesn't choke
-    await engineFunc(userId, supabaseAdmin as any, openai as any); 
+    // ⚡ Golden Fix: Passing all 3 required arguments to the engine function
+    await executeSimoraCoreEngine(userId, supabaseAdmin, openai); 
 
     res.status(200).json({ 
       status: 'SUCCESS', 
-      message: 'Engine executed without throwing an unhandled crash.' 
+      message: 'Engine executed successfully.' 
     });
     return;
   } catch (error: any) {
     console.error('[TEST ROUTE CRASH]:', error);
-    res.status(500).json({ 
-      status: 'ENGINE_CRASHED', 
-      error: error.message 
-    });
+    res.status(500).json({ status: 'ENGINE_CRASHED', error: error.message });
     return;
   }
 });
@@ -150,7 +122,7 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// 6. ASYNCHRONOUS WORKERS
+// BACKGROUND WORKERS
 // ============================================================================
 async function sendWhatsApp(to: string, messagePayload: any): Promise<void> {
   const url = `https://graph.facebook.com/v20.0/${process.env.META_PHONE_ID}/messages`;
@@ -170,7 +142,7 @@ async function sendWhatsApp(to: string, messagePayload: any): Promise<void> {
 }
 
 const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<WhatsAppMessageContext>) => {
-  const { from, text, interactive_reply_id, audio_id } = job.data;
+  const { from, text, interactive_reply_id } = job.data;
   const whatsappHash = crypto.createHash('sha256').update(from).digest('hex');
 
   let { data: user, error: fetchErr } = await supabaseAdmin
@@ -189,7 +161,7 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
     user = newUser;
     await sendWhatsApp(from, {
       type: 'text',
-      text: { body: "SIMORA: Initialization requested.\n\nPlease reply with your primary operating region (e.g., 'Lagos, Nigeria', 'San Francisco')." }
+      text: { body: "SIMORA: Initialization requested.\n\nPlease reply with your primary operating region." }
     });
     return;
   }
@@ -206,7 +178,7 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
 
       await sendWhatsApp(from, {
         type: 'text',
-        text: { body: "Region locked. Please state your primary industry taxonomy (e.g., 'retail-cosmetics', 'saas-logistics')." }
+        text: { body: "Region locked. Please state your primary industry taxonomy." }
       });
       break;
 
@@ -222,12 +194,13 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
         interactive: {
           type: "button",
           header: { type: "text", text: "SIMORA SYSTEM DESIGN" },
-          body: { text: "Identify the primary dynamic layout governing your core business problem today:" },
+          body: { text: "Identify the primary dynamic layout governing your business problem:" },
           action: {
             buttons: [
-              { type: "reply", reply: { id: "TIER_PIPELINE", title: "Pipeline (Flow/Speed)" } },
-              { type: "reply", reply: { id: "TIER_CHURN", title: "Churn (Leak/Loss)" } },
-              { type: "reply", reply: { id: "TIER_ECOSYSTEM", title: "Ecosystem (Shocks)" } } ]
+              { type: "reply", reply: { id: "TIER_PIPELINE", title: "Pipeline" } },
+              { type: "reply", reply: { id: "TIER_CHURN", title: "Churn" } },
+              { type: "reply", reply: { id: "TIER_ECOSYSTEM", title: "Ecosystem" } }
+            ]
           }
         }
       });
@@ -235,13 +208,11 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
 
     case 'AWAITING_SYSTEM_TIER':
       if (!interactive_reply_id) return;
-      
       const tierMapping: Record<string, string> = {
         'TIER_PIPELINE': 'PIPELINE_BOTTLENECK',
         'TIER_CHURN': 'CHURN_LEAK',
         'TIER_ECOSYSTEM': 'ECOSYSTEM_NETWORK'
       };
-
       const selectedTier = tierMapping[interactive_reply_id];
       if (!selectedTier) return;
 
@@ -252,19 +223,18 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
 
       await sendWhatsApp(from, {
         type: 'text',
-        text: { body: `System architecture locked: ${selectedTier}.\n\nAccess your minimal active canvas here: https://simora.app/auth/claim?token=${user.id}` }
+        text: { body: `System architecture locked: ${selectedTier}.\n\nAccess your minimal canvas: https://simora.app/auth/claim?token=${user.id}` }
       });
       break;
 
     case 'PROFILE_ACTIVATED':
-      console.log(`[SIMORA ORCHESTRATION] Routing to executeSimoraCoreEngine for UUID: ${user.id}`);
+      console.log(`[SIMORA ORCHESTRATION] Ready to execute engine for UUID: ${user.id}`);
       break;
   }
 }, { connection: REDIS_CONNECTION });
 
 const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<HydrationPayload>) => {
   const payload = job.data;
-
   const { error: upsertErr } = await supabaseAdmin.from('system_states').upsert({
     user_id: payload.user_id,
     liquid_cash_balance: payload.financial_hydration_payload.account_balance_current,
@@ -274,7 +244,6 @@ const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<Hyd
   }, { onConflict: 'user_id' });
 
   if (upsertErr) throw new Error(`State Update Failed: ${upsertErr.message}`);
-  console.log(`[VECTOR PIPELINE] Enqueueing ${payload.ingested_vector_chunks.length} chunks for UUID: ${payload.user_id}`);
 }, { connection: REDIS_CONNECTION });
 
 app.listen(PORT, () => {
