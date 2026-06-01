@@ -1,14 +1,9 @@
 import express, { Request, Response } from 'express';
-import { createClient } from '@supabase/supabase-js';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
+import { supabaseAdmin } from './lib/supabase';
 
-// ============================================================================
-// 1. CONFIGURATION & SECURE SUPABASE SERVICE ROLE INITIALIZATION
-// ============================================================================
 const PORT = process.env.PORT || 3000;
-const SUPABASE_URL = process.env.SUPABASE_URL as string;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
 const REDIS_CONNECTION = {
   host: process.env.REDIS_HOST || '127.0.0.1',
@@ -16,13 +11,6 @@ const REDIS_CONNECTION = {
   password: process.env.REDIS_PASSWORD,
 };
 
-const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
-
-// ============================================================================
-// 2. TYPESCRIPT INTERFACES
-// ============================================================================
 interface WhatsAppMessageContext {
   from: string;
   text?: string;
@@ -51,15 +39,9 @@ interface HydrationPayload {
   }>;
 }
 
-// ============================================================================
-// 3. BACKGROUND QUEUES (BULLMQ)
-// ============================================================================
 const whatsappQueue = new Queue('WhatsAppStateTransition', { connection: REDIS_CONNECTION });
 const hydrationQueue = new Queue('DataHydrationIngestion', { connection: REDIS_CONNECTION });
 
-// ============================================================================
-// 4. EXPRESS ROUTER
-// ============================================================================
 const app = express();
 app.use(express.json());
 
@@ -94,12 +76,10 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
 app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) => {
   try {
     const payload = req.body as HydrationPayload;
-
     if (!payload.user_id || !payload.financial_hydration_payload) {
        res.status(400).json({ error: 'Malformed Hydration Payload Structure' });
        return;
     }
-
     await hydrationQueue.add('ProcessLedgerSync', payload);
     res.status(200).json({ status: 'SYNC_QUEUED', timestamp: new Date().toISOString() });
     return;
@@ -117,7 +97,6 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
 // ============================================================================
 // 5. ASYNCHRONOUS WORKERS
 // ============================================================================
-
 async function sendWhatsApp(to: string, messagePayload: any): Promise<void> {
   const url = `https://graph.facebook.com/v20.0/${process.env.META_PHONE_ID}/messages`;
   await fetch(url, {
