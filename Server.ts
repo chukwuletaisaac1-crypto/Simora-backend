@@ -17,9 +17,7 @@ const REDIS_CONNECTION = {
 };
 
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false }
-});
-
+  auth: { autoRefreshToken: false, persistSession: false },
 });
 
 // ============================================================================
@@ -34,12 +32,23 @@ interface WhatsAppMessageContext {
 
 interface HydrationPayload {
   user_id: string;
+  system_metadata: {
+    geography_code: string;
+    industry_taxonomy_id: string;
+    assigned_operational_landscape: string;
+  };
   financial_hydration_payload: {
+    provider_gateway: string;
     account_balance_current: number;
+    currency_type: string;
     monthly_operating_burn_rate: number;
     calculated_system_runway_months: number;
   };
-  ingested_vector_chunks: Array<{ chunk_id: string }>;
+  ingested_vector_chunks: Array<{
+    chunk_id: string;
+    text_content: string;
+    embedding_vector_dimensions: number;
+  }>;
 }
 
 // ============================================================================
@@ -75,31 +84,165 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
       });
     }
     res.status(200).send('OK');
+    return;
   } catch (error) {
     res.status(500).send('Internal Ingestion Error');
+    return;
   }
 });
 
-app.post('/api/test-engine', async (req: Request, res: Response) => {
+app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) => {
   try {
-    const { userId, whatsappHash, incomingText, incomingDelta } = req.body;
-    const result = await executeSimoraCoreEngine(
-      { userId, whatsappHash, incomingText, incomingDelta },
-      supabaseAdmin,
+    const payload = req.body as HydrationPayload;
 
-      
-    );
-    return res.status(200).json({ success: true, data: result });
-  } catch (error: any) {
-    return res.status(500).json({ success: false, error: error.message });
+    if (!payload.user_id || !payload.financial_hydration_payload) {
+       res.status(400).json({ error: 'Malformed Hydration Payload Structure' });
+       return;
+    }
+
+    await hydrationQueue.add('ProcessLedgerSync', payload);
+    res.status(200).json({ status: 'SYNC_QUEUED', timestamp: new Date().toISOString() });
+    return;
+  } catch (error) {
+    res.status(500).send('Internal Queue Error');
+    return;
   }
 });
 
 app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
-  res.status(200).send(req.query['hub.challenge']);
+  const challenge = req.query['hub.challenge'];
+  res.status(200).send(challenge);
 });
 
 // ============================================================================
 // 5. ASYNCHRONOUS WORKERS
 // ============================================================================
-// [Rest of your worker code follows here exactly as you have it]
+
+async function sendWhatsApp(to: string, messagePayload: any): Promise<void> {
+  const url = `https://graph.facebook.com/v20.0/${process.env.META_PHONE_ID}/messages`;
+  await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${META_API_TOKEN}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to,
+      ...messagePayload,
+    }),
+  });
+}
+
+const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<WhatsAppMessageContext>) => {
+  const { from, text, interactive_reply_id, audio_id } = job.data;
+  const whatsappHash = crypto.createHash('sha256').update(from).digest('hex');
+
+  let { data: user, error: fetchErr } = await supabaseAdmin
+    .from('users')
+    .select('*')
+    .eq('whatsapp_id_hash', whatsappHash)
+    .single();
+
+  if (!user || fetchErr) {
+    const { data: newUser } = await supabaseAdmin
+      .from('users')
+      .insert([{ whatsapp_id_hash: whatsappHash, current_routing_state: 'AWAITING_LOCATION' }])
+      .select()
+      .single();
+    
+    user = newUser;
+    await sendWhatsApp(from, {
+      type: 'text',
+      text: { body: "SIMORA: Initialization requested.\n\nPlease reply with your primary operating region (e.g., 'Lagos, Nigeria', 'San Francisco')." }
+    });
+    return;
+  }
+
+  switch (user.current_routing_state) {
+    case 'AWAITING_LOCATION':
+      if (!text) return;
+      const locationParts = text.split(',');
+      await supabaseAdmin.from('users').update({
+        current_routing_state: 'AWAITING_INDUSTRY',
+        geo_city_region: locationParts[0]?.trim() || text,
+        geo_country_code: locationParts[1]?.trim() || 'UNKNOWN'
+      }).eq('id', user.id);
+
+      await sendWhatsApp(from, {
+        type: 'text',
+        text: { body: "Region locked. Please state your primary industry taxonomy (e.g., 'retail-cosmetics', 'saas-logistics')." }
+      });
+      break;
+
+    case 'AWAITING_INDUSTRY':
+      if (!text) return;
+      await supabaseAdmin.from('users').update({
+        current_routing_state: 'AWAITING_SYSTEM_TIER',
+        industry_taxonomy_id: text.toLowerCase().replace(/\s+/g, '-')
+      }).eq('id', user.id);
+
+      await sendWhatsApp(from, {
+        type: "interactive",
+        interactive: {
+          type: "button",
+          header: { type: "text", text: "SIMORA SYSTEM DESIGN" },
+          body: { text: "Identify the primary dynamic layout governing your core business problem today:" },
+          action: {
+            buttons: [
+              { type: "reply", reply: { id: "TIER_PIPELINE", title: "Pipeline (Flow/Speed)" } },
+              { type: "reply", reply: { id: "TIER_CHURN", title: "Churn (Leak/Loss)" } },
+              { type: "reply", reply: { id: "TIER_ECOSYSTEM", title: "Ecosystem (Shocks)" } } ]
+          }
+        }
+      });
+      break;
+
+    case 'AWAITING_SYSTEM_TIER':
+      if (!interactive_reply_id) return;
+      
+      const tierMapping: Record<string, string> = {
+        'TIER_PIPELINE': 'PIPELINE_BOTTLENECK',
+        'TIER_CHURN': 'CHURN_LEAK',
+        'TIER_ECOSYSTEM': 'ECOSYSTEM_NETWORK'
+      };
+
+      const selectedTier = tierMapping[interactive_reply_id];
+      if (!selectedTier) return;
+
+      await supabaseAdmin.from('users').update({
+        current_routing_state: 'PROFILE_ACTIVATED',
+        assigned_tier: selectedTier
+      }).eq('id', user.id);
+
+      await sendWhatsApp(from, {
+        type: 'text',
+        text: { body: `System architecture locked: ${selectedTier}.\n\nAccess your minimal active canvas here: https://simora.app/auth/claim?token=${user.id}` }
+      });
+      break;
+
+    case 'PROFILE_ACTIVATED':
+      console.log(`[SIMORA ORCHESTRATION] Routing to executeSimoraCoreEngine for UUID: ${user.id}`);
+      break;
+  }
+}, { connection: REDIS_CONNECTION });
+
+const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<HydrationPayload>) => {
+  const payload = job.data;
+
+  const { error: upsertErr } = await supabaseAdmin.from('system_states').upsert({
+    user_id: payload.user_id,
+    liquid_cash_balance: payload.financial_hydration_payload.account_balance_current,
+    monthly_operating_burn: payload.financial_hydration_payload.monthly_operating_burn_rate,
+    calculated_runway_months: payload.financial_hydration_payload.calculated_system_runway_months,
+    last_external_sync: new Date().toISOString()
+  }, { onConflict: 'user_id' });
+
+  if (upsertErr) throw new Error(`State Update Failed: ${upsertErr.message}`);
+  console.log(`[VECTOR PIPELINE] Enqueueing ${payload.ingested_vector_chunks.length} chunks for UUID: ${payload.user_id}`);
+}, { connection: REDIS_CONNECTION });
+
+app.listen(PORT, () => {
+  console.log(`[SIMORA-GATEWAY] Omnichannel Webhook Gateway active on port ${PORT}`);
+});
