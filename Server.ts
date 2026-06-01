@@ -3,7 +3,7 @@ import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
 import { supabaseAdmin } from './supabase'; // Adjusted to match your root folder
 import { openai } from './openai';         // Adjusted to match your root folder
-import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine'; // Pointing to your engines folder
+import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine.ts'; // Pointing to your engines folder
 
 // ============================================================================
 // 1. CONFIGURATION
