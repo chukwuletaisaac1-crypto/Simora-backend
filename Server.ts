@@ -194,7 +194,7 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
             buttons: [
               { type: "reply", reply: { id: "TIER_PIPELINE", title: "Pipeline (Flow/Speed)" } },
               { type: "reply", reply: { id: "TIER_CHURN", title: "Churn (Leak/Loss)" } },
-              { type: "reply", reply: { id: "TIER_ECOSYSTEM", title: "Ecosystem (Shocks)" } ]
+              { type: "reply", reply: { id: "TIER_ECOSYSTEM", title: "Ecosystem (Shocks)" } } ]
           }
         }
       });
