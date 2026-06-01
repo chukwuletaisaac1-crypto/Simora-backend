@@ -1,4 +1,4 @@
-import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine';
+import { executeSimoraCoreEngine.ts } from './engines/executeSimoraCoreEngine.ts';
 import express, { Request, Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { Queue, Worker, Job } from 'bullmq';
