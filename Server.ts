@@ -2,23 +2,18 @@ import express, { Request, Response } from 'express';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
 import { supabaseAdmin } from './lib/supabase';
-import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine'; // 👈 ADD THIS LINE
+import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine'; // 👈 Fixed path!
+
 // ============================================================================
-// 1. CONFIGURATION & SECURE SUPABASE SERVICE ROLE INITIALIZATION
+// 1. CONFIGURATION
 // ============================================================================
 const PORT = process.env.PORT || 3000;
-const SUPABASE_URL = process.env.SUPABASE_URL as string;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY as string;
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
 const REDIS_CONNECTION = {
   host: process.env.REDIS_HOST || '127.0.0.1',
   port: parseInt(process.env.REDIS_PORT || '6379'),
   password: process.env.REDIS_PASSWORD,
 };
-
-const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  auth: { autoRefreshToken: false, persistSession: false },
-});
 
 // ============================================================================
 // 2. TYPESCRIPT INTERFACES
@@ -58,7 +53,7 @@ const whatsappQueue = new Queue('WhatsAppStateTransition', { connection: REDIS_C
 const hydrationQueue = new Queue('DataHydrationIngestion', { connection: REDIS_CONNECTION });
 
 // ============================================================================
-// 4. EXPRESS ROUTER
+// 4. EXPRESS ROUTER & WEBHOOKS
 // ============================================================================
 const app = express();
 app.use(express.json());
@@ -108,8 +103,9 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
     return;
   }
 });
+
 // ============================================================================
-// TESTING ENDPOINT (SAFE SANDBOX)
+// 5. TESTING ENDPOINT (SAFE SANDBOX)
 // ============================================================================
 app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
   try {
@@ -121,8 +117,6 @@ app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
     }
 
     console.log(`[TEST ROUTE] Safely spinning up engine for UUID: ${userId}`);
-    
-    // This calls your engine function and runs it in isolation
     await executeSimoraCoreEngine(userId); 
 
     res.status(200).json({ 
@@ -146,9 +140,8 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// 5. ASYNCHRONOUS WORKERS
+// 6. ASYNCHRONOUS WORKERS
 // ============================================================================
-
 async function sendWhatsApp(to: string, messagePayload: any): Promise<void> {
   const url = `https://graph.facebook.com/v20.0/${process.env.META_PHONE_ID}/messages`;
   await fetch(url, {
