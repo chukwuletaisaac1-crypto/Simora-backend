@@ -20,8 +20,6 @@ const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false }
 });
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
 });
 
 // ============================================================================
@@ -88,7 +86,8 @@ app.post('/api/test-engine', async (req: Request, res: Response) => {
     const result = await executeSimoraCoreEngine(
       { userId, whatsappHash, incomingText, incomingDelta },
       supabaseAdmin,
-      openai
+
+      
     );
     return res.status(200).json({ success: true, data: result });
   } catch (error: any) {
