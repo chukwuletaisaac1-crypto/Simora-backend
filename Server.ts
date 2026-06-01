@@ -1,4 +1,4 @@
-import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine';
+import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 import express, { Request, Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { Queue, Worker, Job } from 'bullmq';
@@ -122,7 +122,7 @@ app.post('/api/test-engine', async (req: Request, res: Response) => {
     const result = await executeSimoraCoreEngine(
       { userId, whatsappHash, incomingText, incomingDelta },
       supabaseAdmin,
-      openai
+      openAI
     );
     
     return res.status(200).json({ success: true, data: result });
