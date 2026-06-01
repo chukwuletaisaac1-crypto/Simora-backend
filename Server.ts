@@ -92,17 +92,21 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
 // ============================================================================
 app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
   try {
-    const { userId } = req.body;
+    const { userId, whatsappHash, incomingText, incomingDelta } = req.body;
 
-    if (!userId) {
-      res.status(400).json({ error: 'Missing userId in request body' });
+    // Validate that the engine has its required baseline data
+    if (!userId || !whatsappHash || !incomingText) {
+      res.status(400).json({ 
+        error: 'Missing required fields. Provide userId, whatsappHash, and incomingText.' 
+      });
       return;
     }
 
     console.log(`[TEST ROUTE] Spinning up engine for UUID: ${userId}`);
     
-    // ⚡ Golden Fix: Passing all 3 required arguments to the engine function
-    await executeSimoraCoreEngine(userId, supabaseAdmin, openai); 
+    // ⚡ FIX: Packaging the elements into the IngestionContext object structure
+    const ctx = { userId, whatsappHash, incomingText, incomingDelta };
+    await executeSimoraCoreEngine(ctx, supabaseAdmin, openai); 
 
     res.status(200).json({ 
       status: 'SUCCESS', 
@@ -115,6 +119,8 @@ app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
     return;
   }
 });
+  
+ 
 
 app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   const challenge = req.query['hub.challenge'];
