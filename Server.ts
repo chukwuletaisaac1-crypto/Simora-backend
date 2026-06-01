@@ -2,7 +2,6 @@ import express, { Request, Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
-import fetch from 'node-fetch';
 
 // ============================================================================
 // 1. CONFIGURATION & SECURE SUPABASE SERVICE ROLE INITIALIZATION
