@@ -122,7 +122,7 @@ app.post('/api/test-engine', async (req: Request, res: Response) => {
     const result = await executeSimoraCoreEngine(
       { userId, whatsappHash, incomingText, incomingDelta },
       supabaseAdmin,
-      openAI
+      openai
     );
     
     return res.status(200).json({ success: true, data: result });
