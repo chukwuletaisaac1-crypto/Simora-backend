@@ -1,17 +1,19 @@
 {
   "name": "simora-backend",
   "version": "1.0.0",
-  "main": "server.ts",
+  "main": "dist/Server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/Server.js"
+  },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
     "bullmq": "^5.1.0",
     "crypto": "^1.0.1",
     "express": "^4.18.2",
-    "node-fetch": "^2.7.0"
-  },
-  "devDependencies": {
+    "node-fetch": "^2.7.0",
+    "typescript": "^5.3.2",
     "@types/express": "^4.17.21",
-    "@types/node": "^20.10.0",
-    "typescript": "^5.3.2"
+    "@types/node": "^20.10.0"
   }
 }
