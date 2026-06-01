@@ -2,7 +2,11 @@ import express, { Request, Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
-
+import express, { Request, Response } from 'express';
+import { Queue, Worker, Job } from 'bullmq';
+import crypto from 'crypto';
+import { supabaseAdmin } from './lib/supabase';
+import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine'; // 👈 ADD THIS LINE
 // ============================================================================
 // 1. CONFIGURATION & SECURE SUPABASE SERVICE ROLE INITIALIZATION
 // ============================================================================
@@ -105,6 +109,37 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
     return;
   } catch (error) {
     res.status(500).send('Internal Queue Error');
+    return;
+  }
+});
+// ============================================================================
+// TESTING ENDPOINT (SAFE SANDBOX)
+// ============================================================================
+app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
+  try {
+    const { userId } = req.body;
+
+    if (!userId) {
+      res.status(400).json({ error: 'Missing userId in request body' });
+      return;
+    }
+
+    console.log(`[TEST ROUTE] Safely spinning up engine for UUID: ${userId}`);
+    
+    // This calls your engine function and runs it in isolation
+    await executeSimoraCoreEngine(userId); 
+
+    res.status(200).json({ 
+      status: 'SUCCESS', 
+      message: 'Engine executed without throwing an unhandled crash.' 
+    });
+    return;
+  } catch (error: any) {
+    console.error('[TEST ROUTE CRASH]:', error);
+    res.status(500).json({ 
+      status: 'ENGINE_CRASHED', 
+      error: error.message 
+    });
     return;
   }
 });
