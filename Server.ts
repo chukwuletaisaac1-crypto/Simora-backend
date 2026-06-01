@@ -1,3 +1,4 @@
+import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine';
 import express, { Request, Response } from 'express';
 import { createClient } from '@supabase/supabase-js';
 import { Queue, Worker, Job } from 'bullmq';
@@ -112,6 +113,22 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
 app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   const challenge = req.query['hub.challenge'];
   res.status(200).send(challenge);
+});
+// === BRAND NEW TESTING ENDPOINT FOR PHASE 3 ===
+app.post('/api/test-engine', async (req: Request, res: Response) => {
+  try {
+    const { userId, whatsappHash, incomingText, incomingDelta } = req.body;
+    
+    const result = await executeSimoraCoreEngine(
+      { userId, whatsappHash, incomingText, incomingDelta },
+      supabaseAdmin,
+      openai
+    );
+    
+    return res.status(200).json({ success: true, data: result });
+  } catch (error: any) {
+    return res.status(500).json({ success: false, error: error.message });
+  }
 });
 
 // ============================================================================
