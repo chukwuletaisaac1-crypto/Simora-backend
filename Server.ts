@@ -1,8 +1,9 @@
 import express, { Request, Response } from 'express';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
-import { supabaseAdmin } from './lib/supabase';
-import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine'; // 👈 Fixed path!
+import { supabaseAdmin } from './supabase'; // Adjusted to match your root folder
+import { openai } from './openai';         // Adjusted to match your root folder
+import { executeSimoraCoreEngine } from './engines/executeSimoraCoreEngine'; // Pointing to your engines folder
 
 // ============================================================================
 // 1. CONFIGURATION
@@ -117,7 +118,9 @@ app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
     }
 
     console.log(`[TEST ROUTE] Safely spinning up engine for UUID: ${userId}`);
-    await executeSimoraCoreEngine(userId); 
+    
+    // Fed the engine all 3 items it needs to pass type-checking successfully!
+    await executeSimoraCoreEngine(userId, supabaseAdmin, openai); 
 
     res.status(200).json({ 
       status: 'SUCCESS', 
