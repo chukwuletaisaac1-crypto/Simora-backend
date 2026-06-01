@@ -5,7 +5,7 @@ import crypto from 'crypto';
 // 🎯 EXACT ROADMAP PATHS BASED ON YOUR GITHUB SCREENSHOT
 import { supabaseAdmin } from './supabase'; 
 import { openai } from './openai'; 
-import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine'; 
+import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 
 // ============================================================================
 // CONFIGURATION & QUEUES
