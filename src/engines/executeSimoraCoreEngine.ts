@@ -1,11 +1,15 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
+import dns from 'dns'; // 1. Import the native Node DNS module
+
+// 2. Force Node to prioritize IPv4. This completely bypasses the cloud container ENOTFOUND bug.
+dns.setDefaultResultOrder('ipv4first');
 
 /**
- * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION (ROBUST NETWORKING)
+ * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION
  * Path: ./src/engines/executeSimoraCoreEngine.ts
  */
-
+// ... rest of your engine code remains exactly the same
 interface IngestionContext {
   userId: string;
   whatsappHash: string;
