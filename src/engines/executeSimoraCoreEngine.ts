@@ -61,11 +61,13 @@ if (!user) {
     throw new Error("GUARDRAIL_HALT: Variance Scanner detected a delta > 2.5σ. Verify structural environmental pivot.");
   }
 
-  // 3. CONTEXTUAL AUGMENTATION (OPENAI EMBEDDINGS text-embedding-3-small)
-  const embeddingResponse = await openai.embeddings.create({
-    model: 'text-embedding-3-small',
-    input: ctx.incomingText,
-  });
+ // 3. CONTEXTUAL AUGMENTATION (SIMULATED FOR GROQ COMPATIBILITY)
+  // Groq focuses on high-speed inference and doesn't host an embeddings endpoint.
+  // Since our Vector Search is simulated for Phase 3, we bypass the API call entirely.
+  const queryVector = [0.0];
+
+  // Vector Search Simulated Call (as per Blueprint Doc 4, Section 3)
+  const vectorContext = `[Ingested Ledger Context: Current logistics burn is ${state.monthly_operating_burn}/Day]`;
 
   const queryVector = embeddingResponse.data[0].embedding;
 
@@ -94,8 +96,8 @@ if (!user) {
     Assume standard physical constraints, localized logistics routing fees, and energy spot adjustments are locked.
   `;
 
-  const completion = await openai.chat.completions.create({
-    model: 'gpt-4o-mini',
+ const completion = await openai.chat.completions.create({
+    model: 'llama-3.3-70b-versatile', // ⚡ FIX: Using Groq's high-performance model
     temperature: 0.0, // Eliminate behavioral drift
     response_format: { type: "json_object" },
     messages: [
