@@ -2,7 +2,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 
 /**
- * SIMORA CORE ENGINE - PHASE 3 EXECUTION ROUTINE
+ * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION
  * Path: ./src/engines/executeSimoraCoreEngine.ts
  */
 
@@ -10,7 +10,7 @@ interface IngestionContext {
   userId: string;
   whatsappHash: string;
   incomingText: string;
-  incomingDelta?: number; // The specific metric value being updated/reported
+  incomingDelta?: number; 
 }
 
 interface SimoraOutput {
@@ -19,6 +19,42 @@ interface SimoraOutput {
   impact_margin: string;
   auditor_warning: string;
   receipts_log: any;
+}
+
+/**
+ * Helper function to extract free vector embeddings from Hugging Face Inference API
+ */
+async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
+  const hfToken = process.env.HUGGINGFACE_API_KEY;
+  if (!hfToken) {
+    throw new Error("CRITICAL_CONFIGURATION_ERROR: HUGGINGFACE_API_KEY environment variable is missing.");
+  }
+
+  const response = await fetch(
+    "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2",
+    {
+      headers: { 
+        Authorization: `Bearer ${hfToken}`,
+        "Content-Type": "application/json"
+      },
+      method: "POST",
+      body: JSON.stringify({ inputs: text }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorDetails = await response.text();
+    throw new Error(`HUGGING_FACE_API_ERROR: HTTP ${response.status} - ${errorDetails}`);
+  }
+
+  const embedding = await response.json();
+  
+  // Ensure the model returned a flat numeric coordinate array
+  if (!Array.isArray(embedding) || typeof embedding[0] !== 'number') {
+    throw new Error("HUGGING_FACE_API_ERROR: Unexpected response format. Failed to generate proper vector array.");
+  }
+
+  return embedding as number[];
 }
 
 export async function executeSimoraCoreEngine(
@@ -51,27 +87,42 @@ export async function executeSimoraCoreEngine(
     throw new Error(`CRITICAL_SYSTEM_ERROR: System State Missing for User ${user.id}`);
   }
 
-  // 2. MATH GUARDRAIL GATE 1: VARIANCE SCANNER (2.5σ STATISTICAL FILTER)
-  // We calculate drift based on the incomingDelta vs the historical monthly_operating_burn
-  const sigmaBaseline = Number(state.monthly_operating_burn) * 0.15; // Assuming 15% historical std dev
+  // 2. MATH GUARDRAIL GATE 1: VARIANCE SCANNER (2.5 Sigma STATISTICAL FILTER)
+  const sigmaBaseline = Number(state.monthly_operating_burn) * 0.15; 
   const delta = ctx.incomingDelta || 0;
   
   if (Math.abs(delta) > 2.5 * sigmaBaseline) {
-    // Per Blueprint Document 4: Halt the pipeline and flag anomaly
-    throw new Error("GUARDRAIL_HALT: Variance Scanner detected a delta > 2.5σ. Verify structural environmental pivot.");
+    throw new Error("GUARDRAIL_HALT: Variance Scanner detected a delta > 2.5 sigma. Verify structural environmental pivot.");
   }
 
-  // 3. CONTEXTUAL AUGMENTATION (SIMULATED FOR GROQ COMPATIBILITY)
-  // Groq focuses on high-speed inference and doesn't host an embeddings endpoint.
-  // Since our Vector Search is simulated for Phase 3, we bypass the API call entirely.
-  const queryVector = [0.0];
+  // 3. LIVE CONTEXTUAL RETRIEVAL VIA HUGGING FACE & SUPABASE
+  // Generate real 384-dimension coordinate vectors for the current text payload
+  const currentQueryVector = await getHuggingFaceEmbedding(ctx.incomingText);
 
-  // Vector Search Simulated Call (as per Blueprint Doc 4, Section 3)
-  const vectorContext = `[Ingested Ledger Context: Current logistics burn is ${state.monthly_operating_burn}/Day]`;
+  // Perform a geometric cosine similarity search inside our ledger_embeddings database table
+  const { data: matchedContextRecords, error: vectorSearchError } = await supabaseAdmin.rpc(
+    'match_ledger_embeddings',
+    {
+      query_embedding: currentQueryVector,
+      match_threshold: 0.3, // Pull contextual entries with at least a 30% structural match
+      match_count: 3,        // Retrieve the top 3 closest historical context points
+      p_user_id: user.id
+    }
+  );
+
+  if (vectorSearchError) {
+    throw new Error(`VECTOR_SEARCH_ERROR: Database execution anomaly during recall: ${vectorSearchError.message}`);
+  }
+
+  // Consolidate past memories into a single context block for our LLM to read
+  let vectorContext = `[No relevant historical context discovered. Proceeding under baseline assumptions.]`;
+  if (matchedContextRecords && matchedContextRecords.length > 0) {
+    vectorContext = matchedContextRecords
+      .map((record: any, idx: number) => `[Historical Event #${idx + 1}: ${record.content}]`)
+      .join('\n');
+  }
 
   // 4. MATH GUARDRAIL GATE 2: COUPLED-ELASTICITY MATRIX
-  // Logic: Calculate inverse-decay (Runway vs Burn)
-  // If burn increases without a corresponding 1:1.2 runway defense, we flag a death spiral.
   const currentRunway = Number(state.calculated_runway_months);
   const potentialNewBurn = Number(state.monthly_operating_burn) + delta;
   const elasticityScore = currentRunway / (potentialNewBurn / Number(state.monthly_operating_burn));
@@ -90,8 +141,8 @@ export async function executeSimoraCoreEngine(
   `;
 
   const completion = await openai.chat.completions.create({
-    model: 'llama-3.3-70b-versatile', // Groq production model
-    temperature: 0.0, // Eliminate behavioral drift
+    model: 'llama-3.3-70b-versatile',
+    temperature: 0.0, 
     response_format: { type: "json_object" },
     messages: [
       { 
@@ -104,8 +155,11 @@ export async function executeSimoraCoreEngine(
       { 
         role: 'user', 
         content: `
-          CONTEXT_CHUNKS: ${vectorContext}
-          DYNAMIC_INPUT: ${ctx.incomingText}
+          CONTEXT_CHUNKS FROM HISTORICAL LOGS: 
+          ${vectorContext}
+
+          NEW INCOMING DYNAMIC INPUT: 
+          ${ctx.incomingText}
           
           Generate a JSON response with:
           - action_directive: A singular high-leverage instruction.
@@ -123,7 +177,21 @@ export async function executeSimoraCoreEngine(
   
   const parsedOutput = JSON.parse(rawOutput);
 
-  // 6. DATABASE PERSISTENCE (strategy_cards Table)
+  // 6. ASYNC BACKGROUND ACTION: PERSIST NEW INPUT TO THE VECTOR MEMORY TABLE
+  // This records the current transaction's vector signature so it is available for future lookups.
+  const { error: memoryInsertError } = await supabaseAdmin
+    .from('ledger_embeddings')
+    .insert([{
+      user_id: user.id,
+      content: ctx.incomingText,
+      embedding: currentQueryVector
+    }]);
+
+  if (memoryInsertError) {
+    console.error(`MEMORY_LOGGING_WARNING: Failed to log current text vectors: ${memoryInsertError.message}`);
+  }
+
+  // 7. DATABASE PERSISTENCE (strategy_cards Table)
   const { error: insertError } = await supabaseAdmin
     .from('strategy_cards')
     .insert([{
