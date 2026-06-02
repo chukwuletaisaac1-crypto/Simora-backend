@@ -95,7 +95,6 @@ if (!user) {
     [ENVIRONMENTAL_LAW_CONSTANTS]
     Assume standard physical constraints, localized logistics routing fees, and energy spot adjustments are locked.
   `;
-
 const completion = await openai.chat.completions.create({
     model: 'llama-3.3-70b-versatile', // ⚡ FIX: Using Groq's high-performance model
     temperature: 0.0, // Eliminate behavioral drift
