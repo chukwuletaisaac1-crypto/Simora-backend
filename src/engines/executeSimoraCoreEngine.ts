@@ -2,7 +2,7 @@ import { SupabaseClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
 
 /**
- * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION
+ * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION (ROBUST NETWORKING)
  * Path: ./src/engines/executeSimoraCoreEngine.ts
  */
 
@@ -34,11 +34,17 @@ async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
     "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2",
     {
       headers: { 
-        Authorization: `Bearer ${hfToken}`,
-        "Content-Type": "application/json"
+        "Authorization": `Bearer ${hfToken.trim()}`,
+        "Content-Type": "application/json",
+        "User-Agent": "SimoraCoreEngine/1.0.0" // Prevents Cloudflare gateway from dropping the connection
       },
       method: "POST",
-      body: JSON.stringify({ inputs: text }),
+      body: JSON.stringify({ 
+        inputs: text,
+        options: { 
+          wait_for_model: true // Forces the API to wait for the model to boot if it's sleeping
+        }
+      }),
     }
   );
 
@@ -49,12 +55,19 @@ async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
 
   const embedding = await response.json();
   
-  // Ensure the model returned a flat numeric coordinate array
-  if (!Array.isArray(embedding) || typeof embedding[0] !== 'number') {
-    throw new Error("HUGGING_FACE_API_ERROR: Unexpected response format. Failed to generate proper vector array.");
+  if (!embedding) {
+    throw new Error("HUGGING_FACE_API_ERROR: Hugging Face returned an empty payload response.");
   }
 
-  return embedding as number[];
+  // Feature-extraction models sometimes wrap vectors in a nested array layer e.g., [[0.1, 0.2, ...]]
+  const flatEmbedding = Array.isArray(embedding[0]) ? embedding[0] : embedding;
+
+  // Validate we have a proper numeric array matching our 384-dimension column structure
+  if (!Array.isArray(flatEmbedding) || typeof flatEmbedding[0] !== 'number') {
+    throw new Error("HUGGING_FACE_API_ERROR: Unexpected matrix format. Failed to isolate flat numeric vector coordinates.");
+  }
+
+  return flatEmbedding as number[];
 }
 
 export async function executeSimoraCoreEngine(
@@ -96,7 +109,6 @@ export async function executeSimoraCoreEngine(
   }
 
   // 3. LIVE CONTEXTUAL RETRIEVAL VIA HUGGING FACE & SUPABASE
-  // Generate real 384-dimension coordinate vectors for the current text payload
   const currentQueryVector = await getHuggingFaceEmbedding(ctx.incomingText);
 
   // Perform a geometric cosine similarity search inside our ledger_embeddings database table
@@ -104,8 +116,8 @@ export async function executeSimoraCoreEngine(
     'match_ledger_embeddings',
     {
       query_embedding: currentQueryVector,
-      match_threshold: 0.3, // Pull contextual entries with at least a 30% structural match
-      match_count: 3,        // Retrieve the top 3 closest historical context points
+      match_threshold: 0.3, 
+      match_count: 3,        
       p_user_id: user.id
     }
   );
@@ -129,7 +141,7 @@ export async function executeSimoraCoreEngine(
   
   const systemIntegrityFlag = elasticityScore < 0.8 ? "DEATH_SPIRAL_RISK" : "STABLE";
 
-  // 5. CORE INFERENCE PIPELINE (GROQ LLAMA-3.3) - MATH GUARDRAIL GATE 3: CYNICAL AUDITOR
+  // 5. CORE INFERENCE PIPELINE (GROQ LLAMA-3.3)
   const systemFrameworkContext = `
     SYSTEM_ARCHETYPE_TIER: ${user.assigned_tier}
     GEOGRAPHY_CODE: ${user.geo_country_code}-${user.geo_city_region}
@@ -178,7 +190,6 @@ export async function executeSimoraCoreEngine(
   const parsedOutput = JSON.parse(rawOutput);
 
   // 6. ASYNC BACKGROUND ACTION: PERSIST NEW INPUT TO THE VECTOR MEMORY TABLE
-  // This records the current transaction's vector signature so it is available for future lookups.
   const { error: memoryInsertError } = await supabaseAdmin
     .from('ledger_embeddings')
     .insert([{
