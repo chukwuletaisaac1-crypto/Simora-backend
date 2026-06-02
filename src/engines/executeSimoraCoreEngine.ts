@@ -33,13 +33,13 @@ export async function executeSimoraCoreEngine(
     .eq('whatsapp_id_hash', ctx.whatsappHash)
     .single();
   
-if (userErr) {
-  throw new Error(`SUPABASE_DATABASE_CRASH: ${userErr.message} (Code: ${userErr.code})`);
-}
+  if (userErr) {
+    throw new Error(`SUPABASE_DATABASE_CRASH: ${userErr.message} (Code: ${userErr.code})`);
+  }
 
-if (!user) {
-  throw new Error(`CRITICAL_SYSTEM_ERROR: User Profile Unmapped for Hash ${ctx.whatsappHash}`);
-}
+  if (!user) {
+    throw new Error(`CRITICAL_SYSTEM_ERROR: User Profile Unmapped for Hash ${ctx.whatsappHash}`);
+  }
 
   const { data: state, error: stateErr } = await supabaseAdmin
     .from('system_states')
@@ -61,18 +61,12 @@ if (!user) {
     throw new Error("GUARDRAIL_HALT: Variance Scanner detected a delta > 2.5σ. Verify structural environmental pivot.");
   }
 
- // 3. CONTEXTUAL AUGMENTATION (SIMULATED FOR GROQ COMPATIBILITY)
+  // 3. CONTEXTUAL AUGMENTATION (SIMULATED FOR GROQ COMPATIBILITY)
   // Groq focuses on high-speed inference and doesn't host an embeddings endpoint.
   // Since our Vector Search is simulated for Phase 3, we bypass the API call entirely.
   const queryVector = [0.0];
 
   // Vector Search Simulated Call (as per Blueprint Doc 4, Section 3)
-  const vectorContext = `[Ingested Ledger Context: Current logistics burn is ${state.monthly_operating_burn}/Day]`;
-
-  const queryVector = embeddingResponse.data[0].embedding;
-
-  // Vector Search Simulated Call (as per Blueprint Doc 4, Section 3)
-  // In production, this would hit Pinecone. Here we proceed with localized context.
   const vectorContext = `[Ingested Ledger Context: Current logistics burn is ${state.monthly_operating_burn}/Day]`;
 
   // 4. MATH GUARDRAIL GATE 2: COUPLED-ELASTICITY MATRIX
@@ -84,19 +78,19 @@ if (!user) {
   
   const systemIntegrityFlag = elasticityScore < 0.8 ? "DEATH_SPIRAL_RISK" : "STABLE";
 
-  // 5. CORE INFERENCE PIPELINE (GPT-4o-MINI) - MATH GUARDRAIL GATE 3: CYNICAL AUDITOR
-  // Utilizes Prompt Caching System Patterns from Document 4
+  // 5. CORE INFERENCE PIPELINE (GROQ LLAMA-3.3) - MATH GUARDRAIL GATE 3: CYNICAL AUDITOR
   const systemFrameworkContext = `
     SYSTEM_ARCHETYPE_TIER: ${user.assigned_tier}
     GEOGRAPHY_CODE: ${user.geo_country_code}-${user.geo_city_region}
-    INDUSTRY_TAXONOMY_ID: ${user.industry_taxonomy_id}
+    INDUY_TAXONOMY_ID: ${user.industry_taxonomy_id}
     CURRENT_RESILIENCE_SCORE: ${state.resilience_score}
     ELASTICITY_STATUS: ${systemIntegrityFlag}
     [ENVIRONMENTAL_LAW_CONSTANTS]
     Assume standard physical constraints, localized logistics routing fees, and energy spot adjustments are locked.
   `;
-const completion = await openai.chat.completions.create({
-    model: 'llama-3.3-70b-versatile', // ⚡ FIX: Using Groq's high-performance model
+
+  const completion = await openai.chat.completions.create({
+    model: 'llama-3.3-70b-versatile', // Groq production model
     temperature: 0.0, // Eliminate behavioral drift
     response_format: { type: "json_object" },
     messages: [
