@@ -32,10 +32,14 @@ export async function executeSimoraCoreEngine(
     .select('*')
     .eq('whatsapp_id_hash', ctx.whatsappHash)
     .single();
+  
+if (userErr) {
+  throw new Error(`SUPABASE_DATABASE_CRASH: ${userErr.message} (Code: ${userErr.code})`);
+}
 
-  if (userErr || !user) {
-    throw new Error(`CRITICAL_SYSTEM_ERROR: User Profile Unmapped for Hash ${ctx.whatsappHash}`);
-  }
+if (!user) {
+  throw new Error(`CRITICAL_SYSTEM_ERROR: User Profile Unmapped for Hash ${ctx.whatsappHash}`);
+}
 
   const { data: state, error: stateErr } = await supabaseAdmin
     .from('system_states')
