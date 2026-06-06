@@ -34,19 +34,14 @@ async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
     throw new Error("CRITICAL_CONFIGURATION_ERROR: HUGGINGFACE_API_KEY environment variable is missing.");
   }
 
-  const response = await fetch(
-    "https://api-inference.huggingface.co/models/sentence-transformers/all-MiniLM-L6-v2",
-    {
-      headers: { 
-        "Authorization": `Bearer ${hfToken.trim()}`,
-        "Content-Type": "application/json",
-        "User-Agent": "SimoraCoreEngine/1.0.0" // Prevents Cloudflare gateway from dropping the connection
-      },
-      method: "POST",
-      body: JSON.stringify({ 
-        inputs: text,
-        options: { 
-          wait_for_model: true // Forces the API to wait for the model to boot if it's sleeping
+ const response = await fetch('https://13.35.7.112/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
+    'Content-Type': 'application/json',
+    'Host': 'api-inference.huggingface.co' // This is critical!
+  },
+  body: JSON.stringify({ inputs: textToEmbed })
         }
       }),
     }
