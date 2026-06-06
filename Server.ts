@@ -1,3 +1,5 @@
+import dns from 'dns';
+dns.setDefaultResultOrder('ipv4first');
 import express, { Request, Response } from 'express';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
