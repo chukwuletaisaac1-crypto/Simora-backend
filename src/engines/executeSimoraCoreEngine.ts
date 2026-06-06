@@ -1,15 +1,15 @@
 import { SupabaseClient } from '@supabase/supabase-js';
 import OpenAI from 'openai';
-import dns from 'dns'; // 1. Import the native Node DNS module
+import dns from 'dns';
 
-// 2. Force Node to prioritize IPv4. This completely bypasses the cloud container ENOTFOUND bug.
+// Force Node to prioritize IPv4. Bypasses the cloud container ENOTFOUND bug.
 dns.setDefaultResultOrder('ipv4first');
 
 /**
  * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION
  * Path: ./src/engines/executeSimoraCoreEngine.ts
  */
-// ... rest of your engine code remains exactly the same
+
 interface IngestionContext {
   userId: string;
   whatsappHash: string;
@@ -34,18 +34,15 @@ async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
     throw new Error("CRITICAL_CONFIGURATION_ERROR: HUGGINGFACE_API_KEY environment variable is missing.");
   }
 
- const response = await fetch('https://13.35.7.112/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2', {
-  method: 'POST',
-  headers: {
-    'Authorization': `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-    'Content-Type': 'application/json',
-    'Host': 'api-inference.huggingface.co' // This is critical!
-  },
-  body: JSON.stringify({ inputs: textToEmbed })
-        }
-      }),
-    }
-  );
+  const response = await fetch('https://13.35.7.112/pipeline/feature-extraction/sentence-transformers/all-MiniLM-L6-v2', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${hfToken}`,
+      'Content-Type': 'application/json',
+      'Host': 'api-inference.huggingface.co' // This is critical!
+    },
+    body: JSON.stringify({ inputs: text }) // Fixed variable mismatch here
+  });
 
   if (!response.ok) {
     const errorDetails = await response.text();
@@ -144,7 +141,7 @@ export async function executeSimoraCoreEngine(
   const systemFrameworkContext = `
     SYSTEM_ARCHETYPE_TIER: ${user.assigned_tier}
     GEOGRAPHY_CODE: ${user.geo_country_code}-${user.geo_city_region}
-    INDUY_TAXONOMY_ID: ${user.industry_taxonomy_id}
+    INDUSTRY_TAXONOMY_ID: ${user.industry_taxonomy_id}
     CURRENT_RESILIENCE_SCORE: ${state.resilience_score}
     ELASTICITY_STATUS: ${systemIntegrityFlag}
     [ENVIRONMENTAL_LAW_CONSTANTS]
