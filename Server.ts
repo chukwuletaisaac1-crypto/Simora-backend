@@ -1,23 +1,22 @@
 import express, { Request, Response } from 'express';
-import { createClient } from '@supabase/supabase-js';
-import OpenAI from 'openai';
 import dns from 'dns';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
 
-// Force Node to prioritize IPv4 to bypass cloud container network bugs
+// Force Node to prioritize IPv4 to bypass cloud container network/DNS errors
 dns.setDefaultResultOrder('ipv4first');
 
-// 🎯 EXACT ROADMAP PATHS AND IMPORT CLEANUP
+// 🎯 SECURE CORE ARCHITECTURE IMPORTS
 import { supabaseAdmin } from './supabase'; 
 import { openai } from './openai'; 
 import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 
 // ============================================================================
-// CONFIGURATION & QUEUES
+// CONFIGURATION & REDIS QUEUE INITIALIZATION
 // ============================================================================
 const PORT = process.env.PORT || 3000;
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
+
 const REDIS_CONNECTION = {
   host: process.env.REDIS_HOST || '127.0.0.1',
   port: parseInt(process.env.REDIS_PORT || '6379'),
@@ -41,6 +40,7 @@ interface HydrationPayload {
   ingested_vector_chunks: Array<{ chunk_id: string; text_content: string }>;
 }
 
+// Establish high-throughput asynchronous lines to handle inbound traffic spikes gracefully
 const whatsappQueue = new Queue('WhatsAppStateTransition', { connection: REDIS_CONNECTION });
 const hydrationQueue = new Queue('DataHydrationIngestion', { connection: REDIS_CONNECTION });
 
@@ -48,12 +48,12 @@ const app = express();
 app.use(express.json());
 
 // ============================================================================
-// WEBHOOK ROUTES
+// WEBHOOK INGESTION ROUTES
 // ============================================================================
 
 /**
- * 1. LIVE META WEBHOOK HANDSHAKE (GET Verification)
- * Secure verification gateway that confirms ownership with Meta using environment keys.
+ * 1. META WEBHOOK VERIFICATION GATEWAY (GET)
+ * Handshake endpoint that satisfies Meta's security verification protocol.
  */
 app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
@@ -62,18 +62,18 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN;
 
   if (mode === 'subscribe' && token === verifyToken) {
-    console.log("[WHATSAPP WEBHOOK] Secure Meta handshake verified successfully.");
+    console.log("[SERVER] Meta developer webhook verification successful.");
     res.status(200).send(challenge);
     return;
   }
   
-  console.error("[WHATSAPP WEBHOOK] Security handshake rejected due to token mismatch.");
+  console.error("[SERVER] Webhook verification rejected. Verify tokens do not match.");
   res.sendStatus(403);
 });
 
 /**
- * 2. LIVE INBOUND WHATSAPP PAYLOAD INGESTION (POST)
- * Converts Meta packets to safe queue payloads to prevent timeout crashes on high load.
+ * 2. LIVE WHATSAPP INBOUND PAYLOAD RECEIVER (POST)
+ * Captures message events from Meta and safely offloads them directly to the Redis queue.
  */
 app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
   try {
@@ -95,17 +95,19 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
         backoff: { type: 'exponential', delay: 1000 },
       });
     }
+    
     res.status(200).send('OK');
     return;
   } catch (error) {
+    console.error("[SERVER INGESTION ERROR]:", error);
     res.status(500).send('Internal Ingestion Error');
     return;
   }
 });
 
 /**
- * 3. EXTERNAL DATA HYDRATION ROUTE
- * Syncs third-party financial records securely down into the background queue pipelines.
+ * 3. CORE FINANCIAL DATA HYDRATION ROUTE (POST)
+ * Safely ingests ledger sync metrics from external bookkeeping systems.
  */
 app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) => {
   try {
@@ -124,8 +126,8 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
 });
 
 /**
- * 4. ISOLATED MANUAL CORE ENGINE TESTING ENDPOINT
- * Standard isolated testing suite route reserved for direct Postman simulation.
+ * 4. ISOLATED MANUAL TESTING ENDPOINT (POST)
+ * Reserved specifically for your direct, isolated Postman diagnostic calls.
  */
 app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
   try {
@@ -138,25 +140,22 @@ app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
       return;
     }
 
-    console.log(`[TEST ROUTE] Manually executing calculation engine for UUID: ${userId}`);
+    console.log(`[POSTMAN TEST] Manually computing metrics for system target: ${userId}`);
     
     const ctx = { userId, whatsappHash, incomingText, incomingDelta };
     const result = await executeSimoraCoreEngine(ctx, supabaseAdmin, openai); 
 
-    res.status(200).json({ 
-      status: 'SUCCESS', 
-      data: result 
-    });
+    res.status(200).json({ status: 'SUCCESS', data: result });
     return;
   } catch (error: any) {
-    console.error('[TEST ROUTE CRASH]:', error);
+    console.error('[POSTMAN TEST CRASH]:', error);
     res.status(500).json({ status: 'ENGINE_CRASHED', error: error.message });
     return;
   }
 });
 
 // ============================================================================
-// BACKGROUND TRANSMISSION UTILITIES
+// OUTBOUND META DISPATCH TRANSMITTER
 // ============================================================================
 async function sendWhatsApp(to: string, messagePayload: any): Promise<void> {
   const url = `https://graph.facebook.com/v20.0/${process.env.META_PHONE_ID}/messages`;
@@ -176,23 +175,26 @@ async function sendWhatsApp(to: string, messagePayload: any): Promise<void> {
 
   if (!response.ok) {
     const errorLog = await response.text();
-    console.error(`[META TRANSMISSION FAILURE] Status ${response.status}: ${errorLog}`);
+    console.error(`[OUTBOUND API ERROR] Status Code ${response.status}: ${errorLog}`);
   }
 }
 
 // ============================================================================
-// BACKGROUND WORKERS (STATE TRANSITION ORCHESTRATION ENGINE)
+// ASYNC BACKGROUND WORKERS (STATE ORCHESTRATION ENGINE)
 // ============================================================================
+
 const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<WhatsAppMessageContext>) => {
   const { from, text, interactive_reply_id } = job.data;
   const whatsappHash = crypto.createHash('sha256').update(from).digest('hex');
 
+  // Locate the user record via their encrypted structural identity hash
   let { data: user, error: fetchErr } = await supabaseAdmin
     .from('users')
     .select('*')
     .eq('whatsapp_id_hash', whatsappHash)
     .single();
 
+  // If the hash is unmapped, run automatic profile initialization sequence
   if (!user || fetchErr) {
     const { data: newUser } = await supabaseAdmin
       .from('users')
@@ -208,6 +210,7 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
     return;
   }
 
+  // Onboarding & Functional Engine State Machine Routing
   switch (user.current_routing_state) {
     case 'AWAITING_LOCATION':
       if (!text) return;
@@ -271,10 +274,10 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
 
     case 'PROFILE_ACTIVATED':
       if (!text) return;
-      console.log(`[SIMORA ORCHESTRATION] Executing core Llama calculation engine for live active user: ${user.id}`);
+      console.log(`[SIMORA WORKER] Activating Llama computation matrix for active user: ${user.id}`);
       
       try {
-        // Run core engine logic via our secure prototype bypass
+        // Run core calculation sequence utilizing prototype vector bypass
         const engineOutput = await executeSimoraCoreEngine(
           {
             userId: user.id,
@@ -298,10 +301,10 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
           }
         });
       } catch (err: any) {
-        console.error("[WORKER CRITICAL SYSTEM ERROR]:", err.message);
+        console.error("[WORKER ENGINE CRASH]:", err.message);
         await sendWhatsApp(from, {
           type: 'text',
-          text: { body: "⚠️ *Simora Interruption:* The execution matrix hit an anomaly parsing this business calculation scenario." }
+          text: { body: "⚠️ *Simora Interruption:* The execution matrix encountered an evaluation anomaly parsing this scenario." }
         });
       }
       break;
@@ -322,7 +325,7 @@ const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<Hyd
 }, { connection: REDIS_CONNECTION });
 
 // ============================================================================
-// APP BOOTSTRAP INITIALIZATION
+// SERVER INITIALIZATION LISTENER
 // ============================================================================
 app.listen(PORT, () => {
   console.log(`[SIMORA-GATEWAY] Omnichannel Webhook Gateway active on port ${PORT}`);
