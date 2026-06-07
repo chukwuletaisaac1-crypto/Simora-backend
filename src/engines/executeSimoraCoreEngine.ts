@@ -6,7 +6,7 @@ import dns from 'dns';
 dns.setDefaultResultOrder('ipv4first');
 
 /**
- * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION
+ * SIMORA CORE ENGINE - PHASE 4 REAL VECTOR MEMORY INTEGRATION (PROTOTYPE BYPASS MODE)
  * Path: ./src/engines/executeSimoraCoreEngine.ts
  */
 
@@ -26,15 +26,6 @@ interface SimoraOutput {
 }
 
 /**
- * Helper function to extract free vector embeddings from Hugging Face Inference API
- */
-async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
-  const hfToken = process.env.HUGGINGFACE_API_KEY;
-  if (!hfToken) {
-    throw new Error("CRITICAL_CONFIGURATION_ERROR: HUGGINGFACE_API_KEY environment variable is missing.");
-  }
-
-/**
  * PROTOTYPE BYPASS: 
  * Railway's native fetch is clashing with Hugging Face's DNS.
  * For the demo, we return a mathematically valid neutral vector to satisfy Supabase pgvector.
@@ -45,28 +36,6 @@ async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
   
   // Creates an array of 384 numbers (all 0.01) to safely bypass the database vector requirement
   return Array(384).fill(0.01);
-}
-
-  if (!response.ok) {
-    const errorDetails = await response.text();
-    throw new Error(`HUGGING_FACE_API_ERROR: HTTP ${response.status} - ${errorDetails}`);
-  }
-
-  const embedding = await response.json();
-  
-  if (!embedding) {
-    throw new Error("HUGGING_FACE_API_ERROR: Hugging Face returned an empty payload response.");
-  }
-
-  // Feature-extraction models sometimes wrap vectors in a nested array layer e.g., [[0.1, 0.2, ...]]
-  const flatEmbedding = Array.isArray(embedding[0]) ? embedding[0] : embedding;
-
-  // Validate we have a proper numeric array matching our 384-dimension column structure
-  if (!Array.isArray(flatEmbedding) || typeof flatEmbedding[0] !== 'number') {
-    throw new Error("HUGGING_FACE_API_ERROR: Unexpected matrix format. Failed to isolate flat numeric vector coordinates.");
-  }
-
-  return flatEmbedding as number[];
 }
 
 export async function executeSimoraCoreEngine(
@@ -107,7 +76,7 @@ export async function executeSimoraCoreEngine(
     throw new Error("GUARDRAIL_HALT: Variance Scanner detected a delta > 2.5 sigma. Verify structural environmental pivot.");
   }
 
-  // 3. LIVE CONTEXTUAL RETRIEVAL VIA HUGGING FACE & SUPABASE
+  // 3. LIVE CONTEXTUAL RETRIEVAL VIA SUPABASE (USING BYPASS VECTOR)
   const currentQueryVector = await getHuggingFaceEmbedding(ctx.incomingText);
 
   // Perform a geometric cosine similarity search inside our ledger_embeddings database table
