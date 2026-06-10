@@ -4,7 +4,7 @@
   "description": "Simora Core Engine Backend",
   "main": "dist/Server.js",
   "engines": {
-    "node": "20.x"
+    "node": "22.x"
   },
   "scripts": {
     "clean": "rm -rf dist",
@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@types/express": "^4.17.21",
-    "@types/node": "^20.10.0",
+    "@types/node": "^22.0.0",
     "ts-node": "^10.9.1",
     "typescript": "^5.3.2"
   }
