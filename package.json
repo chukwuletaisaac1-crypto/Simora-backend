@@ -3,8 +3,12 @@
   "version": "1.0.0",
   "description": "Simora Core Engine Backend",
   "main": "dist/Server.js",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
-    "build": "tsc",
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc",
     "start": "node dist/Server.js",
     "dev": "ts-node src/Server.ts"
   },
