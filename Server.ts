@@ -1,11 +1,11 @@
 import express, { Request, Response } from 'express';
-import dns from 'dns';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
 
 // 🎯 SECURE CORE ARCHITECTURE IMPORTS
 import { supabaseAdmin } from './supabase'; 
 import { openai } from './openai'; 
+// NOTE: Ensure this path perfectly matches your folder structure!
 import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 
 // ============================================================================
@@ -13,11 +13,14 @@ import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
 
-const REDIS_CONNECTION = {
-  host: process.env.REDIS_HOST || '127.0.0.1',
-  port: parseInt(process.env.REDIS_PORT || '6379'),
-  password: process.env.REDIS_PASSWORD,
-};
+// Fallback logic added: If Railway injects REDIS_URL, we use it. Otherwise, we use your manual variables.
+const REDIS_CONNECTION = process.env.REDIS_URL 
+  ? { url: process.env.REDIS_URL } 
+  : {
+      host: process.env.REDIS_HOST || '127.0.0.1',
+      port: parseInt(process.env.REDIS_PORT || '6379'),
+      password: process.env.REDIS_PASSWORD,
+    };
 
 interface WhatsAppMessageContext {
   from: string;
@@ -47,9 +50,6 @@ app.use(express.json());
 // WEBHOOK INGESTION ROUTES
 // ============================================================================
 
-/**
- * 1. META WEBHOOK VERIFICATION GATEWAY (GET)
- */
 app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
@@ -66,9 +66,6 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   res.sendStatus(403);
 });
 
-/**
- * 2. LIVE WHATSAPP INBOUND PAYLOAD RECEIVER (POST)
- */
 app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
   try {
     const entry = req.body.entry?.[0];
@@ -99,9 +96,6 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
   }
 });
 
-/**
- * 3. CORE FINANCIAL DATA HYDRATION ROUTE (POST)
- */
 app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) => {
   try {
     const payload = req.body as HydrationPayload;
@@ -118,9 +112,6 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
   }
 });
 
-/**
- * 4. ISOLATED MANUAL TESTING ENDPOINT (POST)
- */
 app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
   try {
     const { userId, whatsappHash, incomingText, incomingDelta } = req.body;
@@ -266,7 +257,6 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
       console.log(`[SIMORA WORKER] Activating Llama computation matrix for active user: ${user.id}`);
       
       try {
-        // Run core calculation sequence safely
         await executeSimoraCoreEngine(
           {
             userId: user.id,
@@ -278,7 +268,6 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
           openai
         );
 
-        // Confirm processing to the user without breaking the compiler
         await sendWhatsApp(from, {
           type: 'text',
           text: {
