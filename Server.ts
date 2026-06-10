@@ -3,9 +3,6 @@ import dns from 'dns';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
 
-// Force Node to prioritize IPv4 to bypass cloud container network/DNS errors
-dns.setDefaultResultOrder('ipv4first');
-
 // 🎯 SECURE CORE ARCHITECTURE IMPORTS
 import { supabaseAdmin } from './supabase'; 
 import { openai } from './openai'; 
