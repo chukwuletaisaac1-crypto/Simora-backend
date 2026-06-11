@@ -12,8 +12,11 @@ import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 // CONFIGURATION & REDIS QUEUE INITIALIZATION
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
-
-// Fallback logic added: If Railway injects REDIS_URL, we use it. Otherwise, we use your manual variables.
+const REDIS_CONNECTION = {
+  host: process.env.REDIS_HOST || 'zephyr.proxy.rlwy.net',
+  port: parseInt(process.env.REDIS_PORT || '37887'),
+  password: process.env.REDIS_PASSWORD,
+};
 const REDIS_CONNECTION = process.env.REDIS_URL 
   ? { url: process.env.REDIS_URL } 
   : {
