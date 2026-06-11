@@ -12,19 +12,26 @@ import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
 
-// Consolidated Connection Logic with mandatory TLS for Public Endpoints
+// Optimized Connection Logic for Railway Proxy Environments
+const redisOptions = {
+  tls: { rejectUnauthorized: false },
+  connectTimeout: 10000,
+  enableReadyCheck: false,     // Prevents timeout during initial handshake
+  maxRetriesPerRequest: null, // Required by BullMQ
+};
+
 const REDIS_CONNECTION = process.env.REDIS_URL 
-  ? { url: process.env.REDIS_URL } 
+  ? { url: process.env.REDIS_URL, ...redisOptions } 
   : {
       host: process.env.REDIS_HOST || 'zephyr.proxy.rlwy.net',
       port: parseInt(process.env.REDIS_PORT || '37887', 10),
       password: process.env.REDIS_PASSWORD,
-      tls: {}, // CRITICAL: This enables the required encryption for Public Railway proxies
+      ...redisOptions
     };
 
 // Debug Log for Railway Initialization
 console.log("--- REDIS CONFIG DEBUG ---");
-console.log("Attempting Connection to:", REDIS_CONNECTION);
+console.log("Connection Settings:", JSON.stringify(REDIS_CONNECTION, null, 2));
 console.log("--------------------------");
 
 interface WhatsAppMessageContext {
@@ -142,7 +149,6 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
     return;
   }
 
-  // ... (Your switch statement logic remains here)
   switch (user.current_routing_state) {
     case 'AWAITING_LOCATION':
         if (!text) return;
@@ -161,7 +167,6 @@ const whatsappWorker = new Worker('WhatsAppStateTransition', async (job: Job<Wha
   }
 }, { connection: REDIS_CONNECTION });
 
-// Add Error Listeners to prevent crashes
 whatsappWorker.on('error', (err) => console.error("WhatsApp Worker Error:", err));
 
 const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<HydrationPayload>) => {
