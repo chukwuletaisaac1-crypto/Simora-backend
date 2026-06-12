@@ -1,6 +1,6 @@
 // DEBUG: PRINT ENVIRONMENT VARIABLES (SAFE)
 console.log("--- RAILWAY ENV DEBUG ---");
-console.log("REDIS_HOST is set:", !!process.env.REDIS_HOST);
+console.log("REDISHOST is set:", !!process.env.REDISHOST);
 console.log("REDIS_URL is set:", !!process.env.REDIS_URL);
 console.log("PORT is:", process.env.PORT);
 console.log("-------------------------");
@@ -34,21 +34,21 @@ const META_API_TOKEN = process.env.META_API_TOKEN as string;
 const REDIS_CONNECTION = process.env.REDIS_URL 
   ? { url: process.env.REDIS_URL, maxRetriesPerRequest: null, family: 0 }
   : { 
-      host: process.env.REDIS_HOST || '127.0.0.1', 
-      port: parseInt(process.env.REDIS_PORT || '6379', 10),
-      password: process.env.REDIS_PASSWORD,
+      host: process.env.REDISHOST || '127.0.0.1', 
+      port: parseInt(process.env.REDISPORT || '6379', 10),
+      password: process.env.REDISPASSWORD,
       maxRetriesPerRequest: null, 
       family: 0 
     };
 
 // Only log a warning if BOTH are missing. 
 // Do not crash the app if REDIS_URL is present.
-if (!process.env.REDIS_URL && !process.env.REDIS_HOST) {
+if (!process.env.REDIS_URL && !process.env.REDISHOST) {
   console.error("❌ CRITICAL CONFIGURATION ERROR: No Redis configuration found.");
 }
 
-if (!process.env.REDIS_HOST) {
-  console.error("❌ CRITICAL NETWORK ERROR: REDIS_HOST is undefined. Services are not linked.");
+if (!process.env.REDISHOST) {
+  console.error("❌ CRITICAL NETWORK ERROR: REDISHOST is undefined. Services are not linked.");
 }
 
 interface WhatsAppMessageContext {
