@@ -1,3 +1,10 @@
+// DEBUG: PRINT ENVIRONMENT VARIABLES (SAFE)
+console.log("--- RAILWAY ENV DEBUG ---");
+console.log("REDIS_HOST is set:", !!process.env.REDIS_HOST);
+console.log("REDIS_URL is set:", !!process.env.REDIS_URL);
+console.log("PORT is:", process.env.PORT);
+console.log("-------------------------");
+
 import express, { Request, Response } from 'express';
 import { Queue, Worker, Job } from 'bullmq';
 import crypto from 'crypto';
