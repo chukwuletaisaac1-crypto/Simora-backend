@@ -23,15 +23,20 @@ process.on('unhandledRejection', (reason, promise) => {
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
 
-// IORedis explicitly requires host, port, and password. 
-// It will ignore the 'url' property if passed inside an object.
-const REDIS_CONNECTION = { 
-  host: process.env.REDIS_HOST || '127.0.0.1', 
-  port: parseInt(process.env.REDIS_PORT || '6379', 10),
-  password: process.env.REDIS_PASSWORD,
-  maxRetriesPerRequest: null, 
-  family: 0 
-};
+// We prioritize REDIS_URL because that is the standard Railway format.
+// If it's missing, we try to construct it from individual parts.
+const REDIS_CONNECTION = process.env.REDIS_URL 
+  ? { url: process.env.REDIS_URL, maxRetriesPerRequest: null, family: 0 }
+  : { 
+      host: process.env.REDIS_HOST || '127.0.0.1', 
+      port: parseInt(process.env.REDIS_PORT || '6379', 10),
+      password: process.env.REDIS_PASSWORD,
+      maxRetriesPerRequest: null, 
+      family: 0 
+    };
+
+// Debug log to help us see exactly what's happening during boot
+console.log(`[DEBUG] Attempting Redis connection via: ${process.env.REDIS_URL ? 'URL' : 'Host/Port'}`);
 
 if (!process.env.REDIS_HOST) {
   console.error("❌ CRITICAL NETWORK ERROR: REDIS_HOST is undefined. Services are not linked.");
