@@ -8,6 +8,17 @@ import { openai } from './openai';
 import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 
 // ============================================================================
+// CRITICAL ERROR HANDLERS (RAILWAY CRASH PREVENTION)
+// ============================================================================
+process.on('uncaughtException', (err) => {
+  console.error('CRITICAL UNCAUGHT EXCEPTION:', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('UNHANDLED PROMISE REJECTION:', reason);
+});
+
+// ============================================================================
 // CONFIGURATION & REDIS QUEUE INITIALIZATION
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
@@ -301,8 +312,15 @@ const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<Hyd
 // ============================================================================
 // SERVER INITIALIZATION LISTENER
 // ============================================================================
-// Railway Healthcheck Route
-const PORT = process.env.PORT || 3000;
+
+// 1. Railway Healthcheck Route (Prevents container assassination)
+app.get('/', (req: Request, res: Response) => {
+  res.status(200).send('Simora Gateway is Online');
+});
+
+// 2. Strictly Typed Port Configuration (Fixes TS2769 Build Error)
+const PORT: number = parseInt(process.env.PORT || '3000', 10);
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[SIMORA-GATEWAY] Omnichannel Webhook Gateway active on port ${PORT}`);
 });
