@@ -22,17 +22,20 @@ process.on('unhandledRejection', (reason, promise) => {
 // CONFIGURATION & REDIS QUEUE INITIALIZATION
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
-const REDIS_URL = process.env.REDIS_URL;
 
-if (!REDIS_URL) {
-  console.error("❌ CRITICAL NETWORK ERROR: REDIS_URL is undefined. Services are not linked in Railway.");
+// IORedis explicitly requires host, port, and password. 
+// It will ignore the 'url' property if passed inside an object.
+const REDIS_CONNECTION = { 
+  host: process.env.REDIS_HOST || '127.0.0.1', 
+  port: parseInt(process.env.REDIS_PORT || '6379', 10),
+  password: process.env.REDIS_PASSWORD,
+  maxRetriesPerRequest: null, 
+  family: 0 
+};
+
+if (!process.env.REDIS_HOST) {
+  console.error("❌ CRITICAL NETWORK ERROR: REDIS_HOST is undefined. Services are not linked.");
 }
-
-// BullMQ requires maxRetriesPerRequest: null
-// family: 0 forces Node to try both IPv4 and IPv6, resolving common Railway internal DNS quirks
-const REDIS_CONNECTION = REDIS_URL 
-  ? { url: REDIS_URL, maxRetriesPerRequest: null, family: 0 } 
-  : { host: '127.0.0.1', port: 6379, maxRetriesPerRequest: null };
 
 interface WhatsAppMessageContext {
   from: string;
@@ -308,6 +311,10 @@ const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<Hyd
 
   if (upsertErr) throw new Error(`State Update Failed: ${upsertErr.message}`);
 }, { connection: REDIS_CONNECTION });
+
+// Prevent Workers from crashing the main process on internal Redis errors
+whatsappWorker.on('error', err => console.error('[WHATSAPP WORKER ERROR]:', err));
+hydrationWorker.on('error', err => console.error('[HYDRATION WORKER ERROR]:', err));
 
 // ============================================================================
 // SERVER INITIALIZATION LISTENER
