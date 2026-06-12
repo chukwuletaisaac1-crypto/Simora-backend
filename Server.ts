@@ -301,8 +301,7 @@ const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<Hyd
 // ============================================================================
 // SERVER INITIALIZATION LISTENER
 // ============================================================================
-const PORT = parseInt(process.env.PORT || '3000', 10);
-
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[SIMORA-GATEWAY] Omnichannel Webhook Gateway active on port ${PORT}`);
 });
