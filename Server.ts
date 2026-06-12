@@ -301,13 +301,6 @@ const hydrationWorker = new Worker('DataHydrationIngestion', async (job: Job<Hyd
 // ============================================================================
 // SERVER INITIALIZATION LISTENER
 // ============================================================================
-process.on('uncaughtException', (err) => {
-  console.error('CRITICAL UNCAUGHT EXCEPTION:', err);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('UNHANDLED PROMISE REJECTION:', reason);
-});
 // Railway Healthcheck Route
 app.get('/', (req, res) => {
   res.status(200).send('Simora Gateway is Online');
