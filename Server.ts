@@ -5,22 +5,23 @@ import crypto from 'crypto';
 // 🎯 SECURE CORE ARCHITECTURE IMPORTS
 import { supabaseAdmin } from './supabase'; 
 import { openai } from './openai'; 
-// NOTE: Ensure this path perfectly matches your folder structure!
 import { executeSimoraCoreEngine } from './src/engines/executeSimoraCoreEngine';
 
 // ============================================================================
 // CONFIGURATION & REDIS QUEUE INITIALIZATION
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
+const REDIS_URL = process.env.REDIS_URL;
 
-// Fallback logic added: If Railway injects REDIS_URL, we use it. Otherwise, we use your manual variables.
-const REDIS_CONNECTION = process.env.REDIS_URL 
-  ? { url: process.env.REDIS_URL } 
-  : {
-      host: process.env.REDIS_HOST || '127.0.0.1',
-      port: parseInt(process.env.REDIS_PORT || '6379'),
-      password: process.env.REDIS_PASSWORD,
-    };
+if (!REDIS_URL) {
+  console.error("❌ CRITICAL NETWORK ERROR: REDIS_URL is undefined. Services are not linked in Railway.");
+}
+
+// BullMQ requires maxRetriesPerRequest: null
+// family: 0 forces Node to try both IPv4 and IPv6, resolving common Railway internal DNS quirks
+const REDIS_CONNECTION = REDIS_URL 
+  ? { url: REDIS_URL, maxRetriesPerRequest: null, family: 0 } 
+  : { host: '127.0.0.1', port: 6379, maxRetriesPerRequest: null };
 
 interface WhatsAppMessageContext {
   from: string;
@@ -39,7 +40,6 @@ interface HydrationPayload {
   ingested_vector_chunks: Array<{ chunk_id: string; text_content: string }>;
 }
 
-// Establish high-throughput asynchronous lines to handle inbound traffic spikes gracefully
 const whatsappQueue = new Queue('WhatsAppStateTransition', { connection: REDIS_CONNECTION });
 const hydrationQueue = new Queue('DataHydrationIngestion', { connection: REDIS_CONNECTION });
 
