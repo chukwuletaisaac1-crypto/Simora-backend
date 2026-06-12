@@ -30,8 +30,7 @@ process.on('unhandledRejection', (reason, promise) => {
 // ============================================================================
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
 
-// We prioritize REDIS_URL because that is the standard Railway format.
-// If it's missing, we try to construct it from individual parts.
+// Use the URL if it exists, otherwise fallback to individual components
 const REDIS_CONNECTION = process.env.REDIS_URL 
   ? { url: process.env.REDIS_URL, maxRetriesPerRequest: null, family: 0 }
   : { 
@@ -42,8 +41,11 @@ const REDIS_CONNECTION = process.env.REDIS_URL
       family: 0 
     };
 
-// Debug log to help us see exactly what's happening during boot
-console.log(`[DEBUG] Attempting Redis connection via: ${process.env.REDIS_URL ? 'URL' : 'Host/Port'}`);
+// Only log a warning if BOTH are missing. 
+// Do not crash the app if REDIS_URL is present.
+if (!process.env.REDIS_URL && !process.env.REDIS_HOST) {
+  console.error("❌ CRITICAL CONFIGURATION ERROR: No Redis configuration found.");
+}
 
 if (!process.env.REDIS_HOST) {
   console.error("❌ CRITICAL NETWORK ERROR: REDIS_HOST is undefined. Services are not linked.");
