@@ -165,6 +165,9 @@ app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
   }
 });
 
+console.log("DEBUG: Meta sent:", req.query['hub.verify_token']);
+console.log("DEBUG: I am expecting:", process.env.WHATSAPP_VERIFY_TOKEN);
+
 // ============================================================================
 // OUTBOUND META DISPATCH TRANSMITTER
 // ============================================================================
