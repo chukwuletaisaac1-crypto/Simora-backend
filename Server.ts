@@ -4,8 +4,6 @@ console.log("REDISHOST is set:", !!process.env.REDISHOST);
 console.log("REDIS_URL is set:", !!process.env.REDIS_URL);
 console.log("PORT is:", process.env.PORT);
 console.log("-------------------------");
-console.log("DEBUG: Meta sent:", req.query['hub.verify_token']);
-console.log("DEBUG: I am expecting:", process.env.WHATSAPP_VERIFY_TOKEN);
 
 import express, { Request, Response } from 'express';
 import { Queue, Worker, Job } from 'bullmq';
