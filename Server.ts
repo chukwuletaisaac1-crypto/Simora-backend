@@ -26,7 +26,6 @@ import { executeSimoraCoreEngine }   from './src/engines/executeSimoraCoreEngine
 process.on('uncaughtException', (err) => {
   console.error('[CRITICAL] Uncaught Exception:', err.message, err.stack);
 });
-
 process.on('unhandledRejection', (reason) => {
   console.error('[CRITICAL] Unhandled Promise Rejection:', reason);
 });
@@ -109,10 +108,8 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   const token     = req.query['hub.verify_token'] as string | undefined;
   const challenge = req.query['hub.challenge']    as string | undefined;
 
-  // .trim() is non-negotiable — Railway's env var UI does not strip paste whitespace
   const verifyToken = (process.env.WHATSAPP_VERIFY_TOKEN ?? '').trim();
 
-  // Diagnostic block — JSON.stringify makes invisible whitespace characters visible
   console.log('[WEBHOOK VERIFY] ── Incoming attempt ─────────────────────────────');
   console.log('[WEBHOOK VERIFY] hub.mode:            ', JSON.stringify(mode));
   console.log('[WEBHOOK VERIFY] hub.verify_token:    ', JSON.stringify(token));
@@ -135,14 +132,13 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   }
 
   console.error('[WEBHOOK VERIFY] ❌ Rejected. mode:', JSON.stringify(mode), '| tokenMatch:', token === verifyToken);
-res.sendStatus(403);
+  res.sendStatus(403);
 });
 
 // ============================================================================
 // WEBHOOK — Incoming WhatsApp messages (POST)
 // ============================================================================
 app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
-  // 200 MUST be sent immediately — Meta retries if no ack within 20 seconds
   res.status(200).send('OK');
 
   try {
@@ -152,7 +148,6 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
     const message = value?.messages?.[0];
 
     if (!message) {
-      // Status updates, delivery receipts, read receipts — silently ignore
       return;
     }
 
@@ -164,13 +159,11 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
     };
 
     console.log('[WEBHOOK POST] Queuing message | from:', payload.from, '| type:', message.type);
-
     await whatsappQueue.add('ProcessWhatsAppMessage', payload, {
       attempts: 3,
       backoff:  { type: 'exponential', delay: 1000 },
     });
   } catch (error) {
-    // 200 already sent — log for diagnostics only
     console.error('[WEBHOOK POST] Ingestion error after 200 ack:', error);
   }
 });
@@ -186,7 +179,7 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
       res.status(400).json({ error: 'Malformed Hydration Payload Structure' });
       return;
     }
-  await hydrationQueue.add('ProcessLedgerSync', payload);
+    await hydrationQueue.add('ProcessLedgerSync', payload);
     res.status(200).json({ status: 'SYNC_QUEUED', timestamp: new Date().toISOString() });
   } catch (error) {
     console.error('[HYDRATION WEBHOOK] Queue error:', error);
@@ -238,7 +231,7 @@ async function sendWhatsApp(to: string, messagePayload: object): Promise<void> {
     const response = await fetch(url, {
       method:  'POST',
       headers: {
-  Authorization:  `Bearer ${META_API_TOKEN}`,
+        Authorization:  `Bearer ${META_API_TOKEN}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -263,39 +256,32 @@ async function sendWhatsApp(to: string, messagePayload: object): Promise<void> {
 // ============================================================================
 // SYSTEM STATE SEEDER
 // Called the moment a user completes onboarding (tier selection).
-// This is the core fix — seeds the system_states row immediately in the backend
-// so the engine never encounters a missing state on first use.
-// No frontend, no web link, no external trigger required.
+// Seeds the system_states row immediately in the backend entirely self-sufficient.
 // ============================================================================
 async function seedSystemState(userId: string, assignedTier: string): Promise<void> {
   console.log(`[STATE SEEDER] Seeding system_states for user: ${userId} | tier: ${assignedTier}`);
-
   const { error } = await supabaseAdmin
     .from('system_states')
     .upsert(
       {
         user_id:                  userId,
         assigned_tier:            assignedTier,
-        // Financial defaults — zeroed placeholders until real data is hydrated
         liquid_cash_balance:      0,
         monthly_operating_burn:   0,
         calculated_runway_months: 0,
-        // Matrix context defaults — engine reads these on first scenario run
         pipeline_velocity:        0,
         churn_rate_percentage:    0,
         ecosystem_node_count:     0,
-        // Metadata
         activation_source:        'WHATSAPP_ONBOARDING',
         is_fully_activated:       true,
         last_external_sync:       null,
         created_at:               new Date().toISOString(),
         updated_at:               new Date().toISOString(),
       },
-  { onConflict: 'user_id' }, // Safe to re-run — idempotent upsert
+      { onConflict: 'user_id' },
     );
 
   if (error) {
-    // Throw so the worker retries — this is a critical step, not optional
     console.error(`[STATE SEEDER] ❌ Failed to seed system_states for ${userId}:`, error.message);
     throw new Error(`System state seeding failed: ${error.message}`);
   }
@@ -305,8 +291,7 @@ async function seedSystemState(userId: string, assignedTier: string): Promise<vo
 
 // ============================================================================
 // WORKER — WhatsApp State Machine
-// Handles the full onboarding flow and live scenario processing entirely
-// through WhatsApp. No web link or frontend activation required.
+// Handles the full onboarding flow and live scenario processing entirely through WhatsApp.
 // ============================================================================
 const whatsappWorker = new Worker(
   'WhatsAppStateTransition',
@@ -324,7 +309,6 @@ const whatsappWorker = new Worker(
       .single();
 
     if (fetchErr && fetchErr.code !== 'PGRST116') {
-      // PGRST116 = "no rows found" — that's expected for new users, not an error
       console.error('[WORKER] ❌ Unexpected Supabase fetch error:', fetchErr.message);
       throw new Error(`User fetch failed: ${fetchErr.message}`);
     }
@@ -345,7 +329,7 @@ const whatsappWorker = new Worker(
 
       if (insertErr || !newUser) {
         console.error('[WORKER] ❌ User creation failed:', insertErr?.message);
- throw new Error(`User creation failed: ${insertErr?.message}`);
+        throw new Error(`User creation failed: ${insertErr?.message}`);
       }
 
       user = newUser;
@@ -368,7 +352,6 @@ const whatsappWorker = new Worker(
 
     // ── 3. Existing user — route through state machine ──────────────────────
     console.log(`[WORKER] User ${user.id} | state: ${user.current_routing_state}`);
-
     switch (user.current_routing_state) {
 
       // ── STATE: Collect location ──────────────────────────────────────────
@@ -398,8 +381,7 @@ const whatsappWorker = new Worker(
         if (updateErr) throw new Error(`State update failed: ${updateErr.message}`);
 
         console.log(`[WORKER] Location set for ${user.id}: ${city}, ${countryCode}`);
-
-await sendWhatsApp(from, {
+        await sendWhatsApp(from, {
           type: 'text',
           text: {
             body:
@@ -422,7 +404,6 @@ await sendWhatsApp(from, {
         }
 
         const taxonomyId = text.toLowerCase().replace(/\s+/g, '-');
-
         const { error: updateErr } = await supabaseAdmin
           .from('users')
           .update({
@@ -435,7 +416,6 @@ await sendWhatsApp(from, {
         if (updateErr) throw new Error(`State update failed: ${updateErr.message}`);
 
         console.log(`[WORKER] Industry set for ${user.id}: ${taxonomyId}`);
-
         await sendWhatsApp(from, {
           type: 'interactive',
           interactive: {
@@ -449,8 +429,8 @@ await sendWhatsApp(from, {
             footer: { text: 'This determines your analysis framework.' },
             action: {
               buttons: [
-                { type: 'reply', reply: { id: 'TIER_PIPELINE',  title: '📈 Pipeline'  
-     { type: 'reply', reply: { id: 'TIER_CHURN',     title: '📉 Churn'     } },
+                { type: 'reply', reply: { id: 'TIER_PIPELINE',  title: '📈 Pipeline'  } },
+                { type: 'reply', reply: { id: 'TIER_CHURN',     title: '📉 Churn'     } },
                 { type: 'reply', reply: { id: 'TIER_ECOSYSTEM', title: '🌐 Ecosystem' } },
               ],
             },
@@ -459,7 +439,7 @@ await sendWhatsApp(from, {
         break;
       }
 
-      // ── STATE: Collect tier + SEED SYSTEM STATE (the critical fix) ──────
+      // ── STATE: Collect tier + SEED SYSTEM STATE ──────────────────────────
       case 'AWAITING_SYSTEM_TIER': {
         if (!interactive_reply_id) {
           await sendWhatsApp(from, {
@@ -474,13 +454,11 @@ await sendWhatsApp(from, {
           TIER_CHURN:     'CHURN_LEAK',
           TIER_ECOSYSTEM: 'ECOSYSTEM_NETWORK',
         };
-
         const tierDescriptions: Record<string, string> = {
           PIPELINE_BOTTLENECK: 'Pipeline Bottleneck — optimizes revenue conversion flow',
           CHURN_LEAK:          'Churn Leak — identifies and plugs retention gaps',
           ECOSYSTEM_NETWORK:   'Ecosystem Network — maps and scales partner dynamics',
         };
-
         const selectedTier = tierMapping[interactive_reply_id];
         if (!selectedTier) {
           console.warn(`[WORKER] Unknown tier reply: ${interactive_reply_id}`);
@@ -501,14 +479,10 @@ await sendWhatsApp(from, {
           })
           .eq('id', user.id);
 
-   if (updateErr) throw new Error(`Tier update failed: ${updateErr.message}`);
+        if (updateErr) throw new Error(`Tier update failed: ${updateErr.message}`);
 
         // ── STEP B: Seed system_states immediately — NO frontend required ──
-        // This is the fix for CRITICAL_SYSTEM_ERROR: System State Missing.
-        // The row is created here, in the backend, the moment the user
-        // completes onboarding. The engine will always find it on first use.
         await seedSystemState(user.id, selectedTier);
-
         console.log(`[WORKER] ✅ User ${user.id} fully activated | tier: ${selectedTier}`);
 
         // ── STEP C: Confirm activation entirely through WhatsApp ───────────
@@ -544,14 +518,11 @@ await sendWhatsApp(from, {
         }
 
         console.log(`[WORKER] Running core engine for user: ${user.id}`);
-
-        // Send a "processing" message so the user knows we received it
         await sendWhatsApp(from, {
           type: 'text',
           text: { body: '⚙️ _Processing your scenario..._' },
         });
-
- try {
+        try {
           await executeSimoraCoreEngine(
             {
               userId:        user.id,
@@ -562,7 +533,6 @@ await sendWhatsApp(from, {
             supabaseAdmin,
             openai,
           );
-
           await sendWhatsApp(from, {
             type: 'text',
             text: {
@@ -574,8 +544,7 @@ await sendWhatsApp(from, {
           });
         } catch (err: any) {
           console.error(`[WORKER] Engine crash | user: ${user.id} | error: ${err.message}`);
-
-          // If system state is somehow still missing, attempt recovery
+          
           if (err.message?.includes('CRITICAL_SYSTEM_ERROR') || err.message?.includes('System State Missing')) {
             console.warn(`[WORKER] System state missing for ${user.id} — attempting recovery seed...`);
             try {
@@ -597,7 +566,7 @@ await sendWhatsApp(from, {
                   body: '⚠️ *Critical system error.* Our team has been alerted. Please try again in a few minutes.',
                 },
               });
-   }
+            }
           } else {
             await sendWhatsApp(from, {
               type: 'text',
@@ -613,7 +582,7 @@ await sendWhatsApp(from, {
         break;
       }
 
-      // ── DEFAULT: Unknown state — reset guard ─────────────────────────────
+      // ── DEFAULT: Unknown state ──────────────────────────────────────────
       default: {
         console.warn(`[WORKER] Unknown state "${user.current_routing_state}" for user ${user.id}. Sending guidance.`);
         await sendWhatsApp(from, {
@@ -632,7 +601,6 @@ await sendWhatsApp(from, {
 
 // ============================================================================
 // WORKER — Data Hydration / External Ledger Sync
-// Called by external scraping agents or accounting integrations via REST
 // ============================================================================
 const hydrationWorker = new Worker(
   'DataHydrationIngestion',
@@ -647,7 +615,7 @@ const hydrationWorker = new Worker(
           user_id:                  payload.user_id,
           liquid_cash_balance:      payload.financial_hydration_payload.account_balance_current,
           monthly_operating_burn:   payload.financial_hydration_payload.monthly_operating_burn_rate,
- calculated_runway_months: payload.financial_hydration_payload.calculated_system_runway_months,
+          calculated_runway_months: payload.financial_hydration_payload.calculated_system_runway_months,
           last_external_sync:       new Date().toISOString(),
           updated_at:               new Date().toISOString(),
         },
