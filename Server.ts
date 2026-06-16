@@ -523,7 +523,8 @@ const whatsappWorker = new Worker(
           text: { body: '⚙️ _Processing your scenario..._' },
         });
         try {
-          await executeSimoraCoreEngine(
+          // Capture the actual response from the AI engine
+          const engineResponse = await executeSimoraCoreEngine(
             {
               userId:        user.id,
               whatsappHash:  whatsappHash,
@@ -533,13 +534,17 @@ const whatsappWorker = new Worker(
             supabaseAdmin,
             openai,
           );
+
+          // Defensively parse the response (handles raw strings or JSON objects)
+          const dynamicReply = typeof engineResponse === 'string' 
+            ? engineResponse 
+            : (engineResponse?.text || engineResponse?.reply || JSON.stringify(engineResponse));
+
+          // Dispatch the dynamic AI thought back to the user
           await sendWhatsApp(from, {
             type: 'text',
             text: {
-              body:
-                '📊 *SIMORA ANALYSIS COMPLETE*\n\n' +
-                'Your scenario has been processed and your system matrix has been updated.\n\n' +
-                '_Send another scenario anytime to continue your analysis._',
+              body: dynamicReply,
             },
           });
         } catch (err: any) {
