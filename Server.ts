@@ -255,8 +255,6 @@ async function sendWhatsApp(to: string, messagePayload: object): Promise<void> {
 
 // ============================================================================
 // SYSTEM STATE SEEDER
-// Called the moment a user completes onboarding (tier selection).
-// Seeds the system_states row immediately in the backend entirely self-sufficient.
 // ============================================================================
 async function seedSystemState(userId: string, assignedTier: string): Promise<void> {
   console.log(`[STATE SEEDER] Seeding system_states for user: ${userId} | tier: ${assignedTier}`);
@@ -291,7 +289,6 @@ async function seedSystemState(userId: string, assignedTier: string): Promise<vo
 
 // ============================================================================
 // WORKER — WhatsApp State Machine
-// Handles the full onboarding flow and live scenario processing entirely through WhatsApp.
 // ============================================================================
 const whatsappWorker = new Worker(
   'WhatsAppStateTransition',
@@ -354,7 +351,6 @@ const whatsappWorker = new Worker(
     console.log(`[WORKER] User ${user.id} | state: ${user.current_routing_state}`);
     switch (user.current_routing_state) {
 
-      // ── STATE: Collect location ──────────────────────────────────────────
       case 'AWAITING_LOCATION': {
         if (!text) {
           await sendWhatsApp(from, {
@@ -393,7 +389,6 @@ const whatsappWorker = new Worker(
         break;
       }
 
-      // ── STATE: Collect industry taxonomy ────────────────────────────────
       case 'AWAITING_INDUSTRY': {
         if (!text) {
           await sendWhatsApp(from, {
@@ -439,7 +434,6 @@ const whatsappWorker = new Worker(
         break;
       }
 
-      // ── STATE: Collect tier + SEED SYSTEM STATE ──────────────────────────
       case 'AWAITING_SYSTEM_TIER': {
         if (!interactive_reply_id) {
           await sendWhatsApp(from, {
@@ -469,7 +463,6 @@ const whatsappWorker = new Worker(
           return;
         }
 
-        // ── STEP A: Update user profile ────────────────────────────────────
         const { error: updateErr } = await supabaseAdmin
           .from('users')
           .update({
@@ -481,11 +474,9 @@ const whatsappWorker = new Worker(
 
         if (updateErr) throw new Error(`Tier update failed: ${updateErr.message}`);
 
-        // ── STEP B: Seed system_states immediately — NO frontend required ──
         await seedSystemState(user.id, selectedTier);
         console.log(`[WORKER] ✅ User ${user.id} fully activated | tier: ${selectedTier}`);
 
-        // ── STEP C: Confirm activation entirely through WhatsApp ───────────
         await sendWhatsApp(from, {
           type: 'text',
           text: {
@@ -503,7 +494,6 @@ const whatsappWorker = new Worker(
         break;
       }
 
-      // ── STATE: Live scenario processing (fully operational) ─────────────
       case 'PROFILE_ACTIVATED': {
         if (!text) {
           await sendWhatsApp(from, {
@@ -522,8 +512,9 @@ const whatsappWorker = new Worker(
           type: 'text',
           text: { body: '⚙️ _Processing your scenario..._' },
         });
+        
         try {
-          // Capture the actual response from the AI engine
+          // Capture the structured response from the AI engine
           const engineResponse = await executeSimoraCoreEngine(
             {
               userId:        user.id,
@@ -535,12 +526,25 @@ const whatsappWorker = new Worker(
             openai,
           );
 
-          // Defensively parse the response (handles raw strings or JSON objects)
-          const dynamicReply = typeof engineResponse === 'string' 
-            ? engineResponse 
-            : (engineResponse?.text || engineResponse?.reply || JSON.stringify(engineResponse));
+          // Map the strict SimoraOutput schema directly into the WhatsApp text response
+          let dynamicReply = '';
+          if (typeof engineResponse === 'string') {
+            dynamicReply = engineResponse;
+          } else if (engineResponse) {
+            dynamicReply = 
+              `🧠 *Simora Analysis*\n\n` +
+              `*Action Directive:* ${engineResponse.action_directive || 'Processed successfully.'}\n\n` +
+              `*Runway Impact:* ${engineResponse.impact_runway || 'None detected'}\n` +
+              `*Margin Impact:* ${engineResponse.impact_margin || 'None detected'}`;
+            
+            if (engineResponse.auditor_warning) {
+              dynamicReply += `\n\n⚠️ *Warning:* ${engineResponse.auditor_warning}`;
+            }
+          } else {
+            dynamicReply = 'Analysis processed, but no readable output was returned.';
+          }
 
-          // Dispatch the dynamic AI thought back to the user
+          // Dispatch the formatted AI thought back to the user
           await sendWhatsApp(from, {
             type: 'text',
             text: {
@@ -587,7 +591,6 @@ const whatsappWorker = new Worker(
         break;
       }
 
-      // ── DEFAULT: Unknown state ──────────────────────────────────────────
       default: {
         console.warn(`[WORKER] Unknown state "${user.current_routing_state}" for user ${user.id}. Sending guidance.`);
         await sendWhatsApp(from, {
