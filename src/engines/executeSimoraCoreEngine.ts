@@ -105,7 +105,42 @@ INTENT 3: "FINANCIAL_MATRIX"
     "ledger_hydration_parameters": ["array", "of", "snake_case", "ledger", "keys"],
     "auditor_warning": "Severe downside financial/margin risk explained in detail."
   }
+INTENT 4: "HYDRATE_LEDGER"
+- User provides manual numerical updates to their financial state (e.g., "Set MRR to 45000 and Cash to 120000").
+  {
+    "type": "HYDRATE_LEDGER",
+    "message": "A brief confirmation message acknowledging the numbers have been logged.",
+    "action_directive": null,
+    "strategic_framework": null,
+    "analytical_baselines": null,
+    "algebraic_impact_model": null,
+    "impact_runway": null,
+    "impact_margin": null,
+    "ledger_hydration_parameters": ["mrr", "variable_cogs", "fixed_operating_overhead", "verified_cash_balance"],
+    "auditor_warning": null,
+    "extracted_metrics": {
+      "mrr": "number or null",
+      "variable_cogs": "number or null",
+      "fixed_operating_overhead": "number or null",
+      "verified_cash_balance": "number or null"
+    }
+  }
 
+INTENT 5: "CONNECT_LEDGER"
+- User asks to connect, sync, or integrate an external platform (e.g., Stripe, QuickBooks, Xero).
+  {
+    "type": "CONNECT_LEDGER",
+    "message": "A brief message stating you are generating a secure integration portal link.",
+    "action_directive": null,
+    "strategic_framework": null,
+    "analytical_baselines": null,
+    "algebraic_impact_model": null,
+    "impact_runway": null,
+    "impact_margin": null,
+    "ledger_hydration_parameters": null,
+    "auditor_warning": null,
+    "integration_target": "The requested platform name (e.g., 'stripe', 'quickbooks')"
+  }
 ═══════════════════════════════════════════════════════════════
 CRITICAL: "UNKNOWN" IS FORBIDDEN
 ═══════════════════════════════════════════════════════════════
