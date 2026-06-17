@@ -1,3 +1,9 @@
+// ============================================================================
+// SIMORA GATEWAY — server.ts
+// Railway + BullMQ + Supabase + Meta WhatsApp Cloud API
+// Fully self-sufficient backend loop. No frontend dependency.
+// ============================================================================
+
 // ── Startup environment audit (safe — only logs boolean presence, never values)
 console.log('--- RAILWAY ENV AUDIT ---');
 console.log('REDIS_URL is set:            ', !!process.env.REDIS_URL);
@@ -26,6 +32,7 @@ import { executeSimoraCoreEngine }   from './src/engines/executeSimoraCoreEngine
 process.on('uncaughtException', (err) => {
   console.error('[CRITICAL] Uncaught Exception:', err.message, err.stack);
 });
+
 process.on('unhandledRejection', (reason) => {
   console.error('[CRITICAL] Unhandled Promise Rejection:', reason);
 });
@@ -108,8 +115,10 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
   const token     = req.query['hub.verify_token'] as string | undefined;
   const challenge = req.query['hub.challenge']    as string | undefined;
 
+  // .trim() is non-negotiable — Railway's env var UI does not strip paste whitespace
   const verifyToken = (process.env.WHATSAPP_VERIFY_TOKEN ?? '').trim();
 
+  // Diagnostic block — JSON.stringify makes invisible whitespace characters visible
   console.log('[WEBHOOK VERIFY] ── Incoming attempt ─────────────────────────────');
   console.log('[WEBHOOK VERIFY] hub.mode:            ', JSON.stringify(mode));
   console.log('[WEBHOOK VERIFY] hub.verify_token:    ', JSON.stringify(token));
@@ -139,6 +148,7 @@ app.get('/api/v1/webhook/whatsapp', (req: Request, res: Response) => {
 // WEBHOOK — Incoming WhatsApp messages (POST)
 // ============================================================================
 app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
+  // 200 MUST be sent immediately — Meta retries if no ack within 20 seconds
   res.status(200).send('OK');
 
   try {
@@ -148,6 +158,7 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
     const message = value?.messages?.[0];
 
     if (!message) {
+      // Status updates, delivery receipts, read receipts — silently ignore
       return;
     }
 
@@ -159,11 +170,13 @@ app.post('/api/v1/webhook/whatsapp', async (req: Request, res: Response) => {
     };
 
     console.log('[WEBHOOK POST] Queuing message | from:', payload.from, '| type:', message.type);
+
     await whatsappQueue.add('ProcessWhatsAppMessage', payload, {
       attempts: 3,
       backoff:  { type: 'exponential', delay: 1000 },
     });
   } catch (error) {
+    // 200 already sent — log for diagnostics only
     console.error('[WEBHOOK POST] Ingestion error after 200 ack:', error);
   }
 });
@@ -179,6 +192,7 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
       res.status(400).json({ error: 'Malformed Hydration Payload Structure' });
       return;
     }
+
     await hydrationQueue.add('ProcessLedgerSync', payload);
     res.status(200).json({ status: 'SYNC_QUEUED', timestamp: new Date().toISOString() });
   } catch (error) {
@@ -255,31 +269,40 @@ async function sendWhatsApp(to: string, messagePayload: object): Promise<void> {
 
 // ============================================================================
 // SYSTEM STATE SEEDER
+// Called the moment a user completes onboarding (tier selection).
+// This is the core fix — seeds the system_states row immediately in the backend
+// so the engine never encounters a missing state on first use.
+// No frontend, no web link, no external trigger required.
 // ============================================================================
 async function seedSystemState(userId: string, assignedTier: string): Promise<void> {
   console.log(`[STATE SEEDER] Seeding system_states for user: ${userId} | tier: ${assignedTier}`);
+
   const { error } = await supabaseAdmin
     .from('system_states')
     .upsert(
       {
         user_id:                  userId,
         assigned_tier:            assignedTier,
+        // Financial defaults — zeroed placeholders until real data is hydrated
         liquid_cash_balance:      0,
         monthly_operating_burn:   0,
         calculated_runway_months: 0,
+        // Matrix context defaults — engine reads these on first scenario run
         pipeline_velocity:        0,
         churn_rate_percentage:    0,
         ecosystem_node_count:     0,
+        // Metadata
         activation_source:        'WHATSAPP_ONBOARDING',
         is_fully_activated:       true,
         last_external_sync:       null,
         created_at:               new Date().toISOString(),
         updated_at:               new Date().toISOString(),
       },
-      { onConflict: 'user_id' },
+      { onConflict: 'user_id' }, // Safe to re-run — idempotent upsert
     );
 
   if (error) {
+    // Throw so the worker retries — this is a critical step, not optional
     console.error(`[STATE SEEDER] ❌ Failed to seed system_states for ${userId}:`, error.message);
     throw new Error(`System state seeding failed: ${error.message}`);
   }
@@ -289,6 +312,8 @@ async function seedSystemState(userId: string, assignedTier: string): Promise<vo
 
 // ============================================================================
 // WORKER — WhatsApp State Machine
+// Handles the full onboarding flow and live scenario processing entirely
+// through WhatsApp. No web link or frontend activation required.
 // ============================================================================
 const whatsappWorker = new Worker(
   'WhatsAppStateTransition',
@@ -306,6 +331,7 @@ const whatsappWorker = new Worker(
       .single();
 
     if (fetchErr && fetchErr.code !== 'PGRST116') {
+      // PGRST116 = "no rows found" — that's expected for new users, not an error
       console.error('[WORKER] ❌ Unexpected Supabase fetch error:', fetchErr.message);
       throw new Error(`User fetch failed: ${fetchErr.message}`);
     }
@@ -349,8 +375,10 @@ const whatsappWorker = new Worker(
 
     // ── 3. Existing user — route through state machine ──────────────────────
     console.log(`[WORKER] User ${user.id} | state: ${user.current_routing_state}`);
+
     switch (user.current_routing_state) {
 
+      // ── STATE: Collect location ──────────────────────────────────────────
       case 'AWAITING_LOCATION': {
         if (!text) {
           await sendWhatsApp(from, {
@@ -377,6 +405,7 @@ const whatsappWorker = new Worker(
         if (updateErr) throw new Error(`State update failed: ${updateErr.message}`);
 
         console.log(`[WORKER] Location set for ${user.id}: ${city}, ${countryCode}`);
+
         await sendWhatsApp(from, {
           type: 'text',
           text: {
@@ -389,6 +418,7 @@ const whatsappWorker = new Worker(
         break;
       }
 
+      // ── STATE: Collect industry taxonomy ────────────────────────────────
       case 'AWAITING_INDUSTRY': {
         if (!text) {
           await sendWhatsApp(from, {
@@ -399,6 +429,7 @@ const whatsappWorker = new Worker(
         }
 
         const taxonomyId = text.toLowerCase().replace(/\s+/g, '-');
+
         const { error: updateErr } = await supabaseAdmin
           .from('users')
           .update({
@@ -411,6 +442,7 @@ const whatsappWorker = new Worker(
         if (updateErr) throw new Error(`State update failed: ${updateErr.message}`);
 
         console.log(`[WORKER] Industry set for ${user.id}: ${taxonomyId}`);
+
         await sendWhatsApp(from, {
           type: 'interactive',
           interactive: {
@@ -434,6 +466,7 @@ const whatsappWorker = new Worker(
         break;
       }
 
+      // ── STATE: Collect tier + SEED SYSTEM STATE (the critical fix) ──────
       case 'AWAITING_SYSTEM_TIER': {
         if (!interactive_reply_id) {
           await sendWhatsApp(from, {
@@ -448,11 +481,13 @@ const whatsappWorker = new Worker(
           TIER_CHURN:     'CHURN_LEAK',
           TIER_ECOSYSTEM: 'ECOSYSTEM_NETWORK',
         };
+
         const tierDescriptions: Record<string, string> = {
           PIPELINE_BOTTLENECK: 'Pipeline Bottleneck — optimizes revenue conversion flow',
           CHURN_LEAK:          'Churn Leak — identifies and plugs retention gaps',
           ECOSYSTEM_NETWORK:   'Ecosystem Network — maps and scales partner dynamics',
         };
+
         const selectedTier = tierMapping[interactive_reply_id];
         if (!selectedTier) {
           console.warn(`[WORKER] Unknown tier reply: ${interactive_reply_id}`);
@@ -463,6 +498,7 @@ const whatsappWorker = new Worker(
           return;
         }
 
+        // ── STEP A: Update user profile ────────────────────────────────────
         const { error: updateErr } = await supabaseAdmin
           .from('users')
           .update({
@@ -474,9 +510,15 @@ const whatsappWorker = new Worker(
 
         if (updateErr) throw new Error(`Tier update failed: ${updateErr.message}`);
 
+        // ── STEP B: Seed system_states immediately — NO frontend required ──
+        // This is the fix for CRITICAL_SYSTEM_ERROR: System State Missing.
+        // The row is created here, in the backend, the moment the user
+        // completes onboarding. The engine will always find it on first use.
         await seedSystemState(user.id, selectedTier);
+
         console.log(`[WORKER] ✅ User ${user.id} fully activated | tier: ${selectedTier}`);
 
+        // ── STEP C: Confirm activation entirely through WhatsApp ───────────
         await sendWhatsApp(from, {
           type: 'text',
           text: {
@@ -494,6 +536,7 @@ const whatsappWorker = new Worker(
         break;
       }
 
+      // ── STATE: Live scenario processing (fully operational) ─────────────
       case 'PROFILE_ACTIVATED': {
         if (!text) {
           await sendWhatsApp(from, {
@@ -508,14 +551,9 @@ const whatsappWorker = new Worker(
         }
 
         console.log(`[WORKER] Running core engine for user: ${user.id}`);
-        await sendWhatsApp(from, {
-          type: 'text',
-          text: { body: '⚙️ _Processing your scenario..._' },
-        });
-        
+
         try {
-          // Capture the structured response from the AI engine
-          const engineResponse = await executeSimoraCoreEngine(
+          const result = await executeSimoraCoreEngine(
             {
               userId:        user.id,
               whatsappHash:  whatsappHash,
@@ -526,34 +564,57 @@ const whatsappWorker = new Worker(
             openai,
           );
 
-          // Map the strict SimoraOutput schema directly into the WhatsApp text response
-          let dynamicReply = '';
-          if (typeof engineResponse === 'string') {
-            dynamicReply = engineResponse;
-          } else if (engineResponse) {
-            dynamicReply = 
-              `🧠 *Simora Analysis*\n\n` +
-              `*Action Directive:* ${engineResponse.action_directive || 'Processed successfully.'}\n\n` +
-              `*Runway Impact:* ${engineResponse.impact_runway || 'None detected'}\n` +
-              `*Margin Impact:* ${engineResponse.impact_margin || 'None detected'}`;
-            
-            if (engineResponse.auditor_warning) {
-              dynamicReply += `\n\n⚠️ *Warning:* ${engineResponse.auditor_warning}`;
+          // ── Branch the WhatsApp reply on the engine's intent-routed type ──
+          switch (result.type) {
+            case 'CASUAL_CHAT': {
+              await sendWhatsApp(from, {
+                type: 'text',
+                text: { body: result.message },
+              });
+              break;
             }
-          } else {
-            dynamicReply = 'Analysis processed, but no readable output was returned.';
-          }
 
-          // Dispatch the formatted AI thought back to the user
-          await sendWhatsApp(from, {
-            type: 'text',
-            text: {
-              body: dynamicReply,
-            },
-          });
+            case 'STRATEGIC_ADVICE': {
+              const warningBlock = result.auditor_warning
+                ? `\n\n⚠️ *Auditor flag:* ${result.auditor_warning}`
+                : '';
+
+              await sendWhatsApp(from, {
+                type: 'text',
+                text: {
+                  body:
+                    `🎯 *Directive:* ${result.action_directive}\n\n` +
+                    `*Framework:* ${result.strategic_framework}` +
+                    warningBlock,
+                },
+              });
+              break;
+            }
+
+            case 'FINANCIAL_MATRIX': {
+              const warningBlock = result.auditor_warning
+                ? `\n\n⚠️ *Auditor flag:* ${result.auditor_warning}`
+                : '';
+
+              await sendWhatsApp(from, {
+                type: 'text',
+                text: {
+                  body:
+                    '📊 *SIMORA SYSTEM ANALYSIS*\n\n' +
+                    `🎯 *Directive:* ${result.action_directive}\n` +
+                    `📈 *Runway impact:* ${result.impact_runway}\n` +
+                    `💰 *Margin impact:* ${result.impact_margin}` +
+                    warningBlock +
+                    '\n\n_Your system matrix has been updated._',
+                },
+              });
+              break;
+            }
+          }
         } catch (err: any) {
           console.error(`[WORKER] Engine crash | user: ${user.id} | error: ${err.message}`);
-          
+
+          // If system state is somehow still missing, attempt recovery
           if (err.message?.includes('CRITICAL_SYSTEM_ERROR') || err.message?.includes('System State Missing')) {
             console.warn(`[WORKER] System state missing for ${user.id} — attempting recovery seed...`);
             try {
@@ -591,6 +652,7 @@ const whatsappWorker = new Worker(
         break;
       }
 
+      // ── DEFAULT: Unknown state — reset guard ─────────────────────────────
       default: {
         console.warn(`[WORKER] Unknown state "${user.current_routing_state}" for user ${user.id}. Sending guidance.`);
         await sendWhatsApp(from, {
@@ -609,6 +671,7 @@ const whatsappWorker = new Worker(
 
 // ============================================================================
 // WORKER — Data Hydration / External Ledger Sync
+// Called by external scraping agents or accounting integrations via REST
 // ============================================================================
 const hydrationWorker = new Worker(
   'DataHydrationIngestion',
