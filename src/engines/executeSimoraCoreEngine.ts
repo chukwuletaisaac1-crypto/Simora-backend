@@ -253,6 +253,56 @@ function selfHealAndValidateOutput(parsed: any): SimoraEngineResponse {
 // ============================================================================
 // MAIN ENGINE EXPORT
 // ============================================================================
+function calculateConfidenceScore(
+  ledgerMetrics: any,
+  systemState: any
+) {
+  let score = 100;
+  const reasons: string[] = [];
+
+  if (!ledgerMetrics) {
+    score -= 40;
+    reasons.push('No financial ledger connected');
+  } else {
+    if (ledgerMetrics.mrr == null) {
+      score -= 15;
+      reasons.push('Missing MRR');
+    }
+
+    if (ledgerMetrics.variable_cogs == null) {
+      score -= 15;
+      reasons.push('Missing variable COGS');
+    }
+
+    if (ledgerMetrics.fixed_operating_overhead == null) {
+      score -= 15;
+      reasons.push('Missing fixed overhead');
+    }
+
+    if (ledgerMetrics.verified_cash_balance == null) {
+      score -= 15;
+      reasons.push('Missing cash balance');
+    }
+  }
+
+  if (!systemState?.calculated_runway_months) {
+    score -= 20;
+    reasons.push('Runway unavailable');
+  }
+
+  if (score < 0) score = 0;
+
+  let grade = 'LOW';
+
+  if (score >= 80) grade = 'HIGH';
+  else if (score >= 60) grade = 'MEDIUM';
+
+  return {
+    score,
+    grade,
+    reasons
+  };
+}
 async function getPendingDecisionFollowup(
   userId: string,
   supabaseAdmin: SupabaseClient
