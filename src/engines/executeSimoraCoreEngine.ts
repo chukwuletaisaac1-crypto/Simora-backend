@@ -288,6 +288,10 @@ export async function executeSimoraCoreEngine(
   if (userErr || !user) {
     throw new Error(`SUPABASE_DATABASE_CRASH: Profile Unmapped or DB unreachable. ${userErr?.message}`);
   }
+  const pendingDecision = await getPendingDecisionFollowup(
+  user.id,
+  supabaseAdmin
+);
 
   const { data: state, error: stateErr } = await supabaseAdmin
     .from('system_states')
@@ -324,6 +328,17 @@ export async function executeSimoraCoreEngine(
       .map((record: any, idx: number) => `[Historical Event #${idx + 1}: ${record.content}]`)
       .join('\n');
   }
+  let decisionFollowupContext = '';
+
+if (pendingDecision) {
+  decisionFollowupContext = `
+  PENDING_DECISION_REVIEW:
+  Previous Question: ${pendingDecision.user_question}
+  Previous Recommendation: ${pendingDecision.simora_recommendation}
+
+  If relevant to current conversation, ask the user whether they acted on this recommendation.
+  `;
+}
 
   // 3. SYSTEM ONTOLOGY INJECTION WITH REAL-TIME SNAPSHOT OVERRIDES
   const systemFrameworkContext = `
