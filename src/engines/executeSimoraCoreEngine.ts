@@ -453,10 +453,7 @@ if (
     console.error('DECISION_LOG_ERROR:', error.message);
   }
 }
-  // 8. DATA CONTROLLER RETURN
-  return validatedOutput;
-}
-// 8A. DECISION LOGGER — Persist strategic decisions for future outcome learning
+  // 8A. DECISION LOGGER — Persist strategic decisions for future outcome learning
 if (
   validatedOutput.type === 'FINANCIAL_MATRIX' ||
   validatedOutput.type === 'STRATEGIC_ADVICE'
@@ -480,3 +477,7 @@ if (
     );
   }
 }
+  // 8. DATA CONTROLLER RETURN
+  return validatedOutput;
+}
+
