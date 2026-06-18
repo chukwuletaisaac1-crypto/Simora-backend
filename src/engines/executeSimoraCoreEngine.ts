@@ -354,10 +354,15 @@ export async function executeSimoraCoreEngine(
 
   // OPTION 1 & 2 LINK: Query live synchronized financial metrics if they exist
   const { data: ledgerMetrics } = await supabaseAdmin
-    .from('ledger_metrics')
+   .from('ledger_metrics')
     .select('*')
     .eq('user_id', user.id)
     .single();
+   let confidenceData: any = null;
+    confidenceData = calculateConfidenceScore(
+  ledgerMetrics,
+  state
+   );
 
   // 2. LIVE CONTEXTUAL RETRIEVAL (VECTOR MEMORY)
   const currentQueryVector = await getHuggingFaceEmbedding(ctx.incomingText);
