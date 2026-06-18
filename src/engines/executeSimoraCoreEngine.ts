@@ -410,6 +410,11 @@ if (pendingDecision) {
     Fixed_Operating_Overhead: ${ledgerMetrics?.fixed_operating_overhead ?? 'Omitted (Using Conceptual Fallbacks)'}
     Verified_Cash_Balance: ${ledgerMetrics?.verified_cash_balance ?? 'Omitted (Using Conceptual Fallbacks)'}
     Last_State_Hydration_Method: ${ledgerMetrics?.last_hydrated_by ?? 'None'}
+
+    SIMORA CONFIDENCE SCORE:
+    Confidence Score: ${confidenceData.score}
+    Confidence Grade: ${confidenceData.grade}
+    Confidence Weaknesses: ${confidenceData.reasons.join(', ') || 'None'}
   `;
 
   // 4. INFERENCE LOOP EXECUTED IN GROQ-COMPATIBLE JSON OBJECT MODE
