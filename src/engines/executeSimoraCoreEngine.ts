@@ -254,6 +254,24 @@ function selfHealAndValidateOutput(parsed: any): SimoraEngineResponse {
 // ============================================================================
 // MAIN ENGINE EXPORT
 // ============================================================================
+async function getPendingDecisionFollowup(
+  userId: string,
+  supabaseAdmin: SupabaseClient
+) {
+  const { data, error } = await supabaseAdmin
+    .from('decision_logs')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('decision_status', 'PENDING')
+    .order('created_at', { ascending: false })
+    .limit(1);
+
+  if (error || !data || data.length === 0) {
+    return null;
+  }
+
+  return data[0];
+}
 export async function executeSimoraCoreEngine(
   ctx: IngestionContext,
   supabaseAdmin: SupabaseClient,
