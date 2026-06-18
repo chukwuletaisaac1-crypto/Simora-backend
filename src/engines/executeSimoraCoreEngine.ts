@@ -368,7 +368,16 @@ if (pendingDecision) {
       { role: 'system', content: systemFrameworkContext },
       {
         role: 'user',
-        content: `CONTEXT_CHUNKS FROM HISTORICAL LOGS:\n${vectorContext}\n\nNEW INCOMING MESSAGE:\n${ctx.incomingText}\n\nClassify intent and output valid JSON following the schema requirements specified in system instructions.`,
+       content: `CONTEXT_CHUNKS FROM HISTORICAL LOGS:
+       ${vectorContext}
+
+       DECISION FOLLOWUP CONTEXT:
+       ${decisionFollowupContext}
+
+      NEW INCOMING MESSAGE:
+      ${ctx.incomingText}
+
+      Classify intent and output valid JSON following schema requirements.`,
       },
     ],
   });
