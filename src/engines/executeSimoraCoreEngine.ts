@@ -43,7 +43,6 @@ interface ConfidenceMeta {
   confidence_grade: 'HIGH' | 'MEDIUM' | 'LOW';
   confidence_reasons: string[];
 }
-
 type SimoraEngineResponse =
   | ({
       type: 'CASUAL_CHAT';
@@ -136,7 +135,7 @@ INTENT 1: "CASUAL_CHAT"
     "type": "CASUAL_CHAT",
     "message": "Conversational response, matched to user's message length",
     "action_directive": null, "strategic_framework": null, "analytical_baselines": null,
-    "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null,
+"algebraic_impact_model": null, "impact_runway": null, "impact_margin": null,
     "ledger_hydration_parameters": null, "auditor_warning": null
   }
 
@@ -185,7 +184,7 @@ INTENT 5: "CONNECT_LEDGER"
     "type": "CONNECT_LEDGER",
     "message": "Brief, one sentence: generating a secure integration link.",
     "action_directive": null, "strategic_framework": null, "analytical_baselines": null,
-    "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null,
+ "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null,
     "ledger_hydration_parameters": null, "auditor_warning": null,
     "integration_target": "platform name, e.g. 'stripe'"
   }
@@ -232,7 +231,7 @@ function selfHealAndValidateOutput(parsed: any): Omit<SimoraEngineResponse, keyo
     else type = parsed.algebraic_impact_model || parsed.impact_runway ? 'FINANCIAL_MATRIX' : 'CASUAL_CHAT';
   }
 
-  if (type === 'CASUAL_CHAT') {
+ if (type === 'CASUAL_CHAT') {
     return {
       type: 'CASUAL_CHAT',
       message: String(parsed.message || "Simora's online — what's on your mind?").trim(),
@@ -275,7 +274,7 @@ function selfHealAndValidateOutput(parsed: any): Omit<SimoraEngineResponse, keyo
   }
 
   // FINANCIAL_MATRIX fallback
-  const hedgePattern = /\b(unknown|insufficient data|not enough information|i'?d need more)\b/i;
+ const hedgePattern = /\b(unknown|insufficient data|not enough information|i'?d need more)\b/i;
   let modelText = String(parsed.algebraic_impact_model || "");
 
   if (!modelText || hedgePattern.test(modelText)) {
@@ -320,7 +319,7 @@ function calculateConfidenceScore(
   if (!systemState?.calculated_runway_months) {
     score -= 20;
     reasons.push('Runway unavailable');
-  }
+ }
 
   if (score < 0) score = 0;
 
@@ -372,7 +371,7 @@ export async function executeSimoraCoreEngine(
     .eq('user_id', user.id)
     .single();
 
-  if (stateErr || !state) {
+ if (stateErr || !state) {
     throw new Error(`CRITICAL_SYSTEM_ERROR: System State Missing for User ${user.id}`);
   }
 
@@ -421,8 +420,7 @@ export async function executeSimoraCoreEngine(
     CURRENT_RESILIENCE_SCORE: ${state.resilience_score}
     Runway.current_months: ${state.calculated_runway_months}
     BurnRate.monthly: ${state.monthly_operating_burn}
-
-    REAL-TIME SYNCHRONIZED FINANCIAL LEDGER SNAPSHOTS (SUPABASE):
+REAL-TIME SYNCHRONIZED FINANCIAL LEDGER SNAPSHOTS (SUPABASE):
     MRR: ${ledgerMetrics?.mrr ?? 'Omitted (Using Conceptual Fallbacks)'}
     Variable_COGS: ${ledgerMetrics?.variable_cogs ?? 'Omitted (Using Conceptual Fallbacks)'}
     Fixed_Operating_Overhead: ${ledgerMetrics?.fixed_operating_overhead ?? 'Omitted (Using Conceptual Fallbacks)'}
@@ -469,8 +467,7 @@ Classify intent and output valid JSON following schema requirements. Respect the
     console.warn(`JSON_PARSE_WARNING: Raw token parsing failed. Routing into self-healing engine.`);
     parsedRaw = {};
   }
-
-  // ── 5. RUNTIME VALIDATION & SELF-HEALING ─────────────────────────────────
+ // ── 5. RUNTIME VALIDATION & SELF-HEALING ─────────────────────────────────
   const healedOutput = selfHealAndValidateOutput(parsedRaw);
 
   // ── 6. ATTACH CONFIDENCE — code-computed, attached to every response type ─
@@ -517,7 +514,7 @@ Classify intent and output valid JSON following schema requirements. Respect the
     if (metrics.mrr !== null) updatePayload.mrr = metrics.mrr;
     if (metrics.variable_cogs !== null) updatePayload.variable_cogs = metrics.variable_cogs;
     if (metrics.fixed_operating_overhead !== null) updatePayload.fixed_operating_overhead = metrics.fixed_operating_overhead;
-    if (metrics.verified_cash_balance !== null) updatePayload.verified_cash_balance = metrics.verified_cash_balance;
+ if (metrics.verified_cash_balance !== null) updatePayload.verified_cash_balance = metrics.verified_cash_balance;
 
     const { error: upsertError } = await supabaseAdmin
       .from('ledger_metrics')
@@ -562,7 +559,7 @@ Classify intent and output valid JSON following schema requirements. Respect the
       }]);
 
     if (decisionLogError) {
-      console.error(`DECISION_LOG_WARNING: Failed to persist decision log: ${decisionLogError.message}`);
+ console.error(`DECISION_LOG_WARNING: Failed to persist decision log: ${decisionLogError.message}`);
     }
   }
 
