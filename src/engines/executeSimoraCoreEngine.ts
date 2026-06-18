@@ -456,3 +456,27 @@ if (
   // 8. DATA CONTROLLER RETURN
   return validatedOutput;
 }
+// 8A. DECISION LOGGER — Persist strategic decisions for future outcome learning
+if (
+  validatedOutput.type === 'FINANCIAL_MATRIX' ||
+  validatedOutput.type === 'STRATEGIC_ADVICE'
+) {
+  const recommendation = validatedOutput.action_directive;
+
+  const { error: decisionLogError } = await supabaseAdmin
+    .from('decision_logs')
+    .insert([
+      {
+        user_id: user.id,
+        user_question: ctx.incomingText,
+        simora_recommendation: recommendation,
+        decision_status: 'PENDING',
+      },
+    ]);
+
+  if (decisionLogError) {
+    console.error(
+      `DECISION_LOG_WARNING: Failed to persist decision log: ${decisionLogError.message}`
+    );
+  }
+}
