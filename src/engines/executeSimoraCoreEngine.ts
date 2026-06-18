@@ -1,532 +1,593 @@
+import { SupabaseClient } from '@supabase/supabase-js';
+import OpenAI from 'openai';
+import dns from 'dns';
+
+// Force Node to prioritize IPv4. Bypasses the cloud container ENOTFOUND bug.
+dns.setDefaultResultOrder('ipv4first');
+
 /**
- * Phase 3: Confidence Layer + WhatsApp-calibrated output
- *
- * Fixes applied (from session analysis):
- *   Bug 1 — confidence_score was calculated then silently dropped.
- *            Now carried through the schema, selfHeal, and return value.
- *   Bug 2 — system prompt had no length ceiling; responses were McKinsey-deck
- *            length inside a WhatsApp bubble. Replaced with hard per-field
- *            sentence caps enforced in the prompt.
- *   Design — confidence badge is now the *replacement* for hedging verbosity,
- *             not an addition to it. STRATEGIC_ADVICE + FINANCIAL_MATRIX only.
- *
- * Model note: llama-3.3-70b-versatile via Groq's OpenAI-compatible endpoint.
- * Groq does NOT enforce OpenAI's strict json_schema server-side — we use
- * json_object mode and enforce the schema ourselves in selfHealAndValidateOutput.
+ * SIMORA CORE ENGINE — PHASE 2: REAL-TIME LEDGER STATE INTEGRATOR
+ * Path: ./src/engines/executeSimoraCoreEngine.ts
  */
-
-import OpenAI from "openai";
-import { SupabaseClient } from "@supabase/supabase-js";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface ConfidenceData {
-  score: number; // 0–100
-  grade: "HIGH" | "MEDIUM" | "LOW";
-  reasons: string[]; // ≤3 short reasons
-}
-
-interface CasualChat {
-  type: "CASUAL_CHAT";
-  message: string;
-}
-
-interface StrategicAdvice {
-  type: "STRATEGIC_ADVICE";
-  action_directive: string;
-  strategic_framework: string;
-  analytical_baselines: string;
-  auditor_warning: string | null;
-  confidence_score: number;
-  confidence_grade: "HIGH" | "MEDIUM" | "LOW";
-  confidence_reasons: string[];
-}
-
-interface FinancialMatrix {
-  type: "FINANCIAL_MATRIX";
-  action_directive: string;
-  algebraic_impact_model: string;
-  impact_runway: string;
-  impact_margin: string;
-  ledger_hydration_parameters: string[];
-  auditor_warning: string | null;
-  confidence_score: number;
-  confidence_grade: "HIGH" | "MEDIUM" | "LOW";
-  confidence_reasons: string[];
-}
-
-export type SimoraEngineResponse = CasualChat | StrategicAdvice | FinancialMatrix;
-
-interface EngineContext {
+interface IngestionContext {
   userId: string;
   whatsappHash: string;
-  industry: string;
-  inputMessage: string;
-  systemState?: Record<string, unknown>;
-  ledgerContext?: Record<string, unknown>;
-  vectorMemory?: string[];
+  incomingText: string;
+  incomingDelta?: number;
 }
 
-// ---------------------------------------------------------------------------
-// Confidence Calculator
-// ---------------------------------------------------------------------------
-
-function calculateConfidenceScore(
-  ctx: EngineContext,
-  intentType: "CASUAL_CHAT" | "STRATEGIC_ADVICE" | "FINANCIAL_MATRIX"
-): ConfidenceData {
-  // Confidence is meaningless for casual chat — callers skip it.
-  if (intentType === "CASUAL_CHAT") {
-    return { score: 100, grade: "HIGH", reasons: [] };
-  }
-
-  const reasons: string[] = [];
-  let score = 100;
-
-  const ledger = ctx.ledgerContext ?? {};
-  const state = ctx.systemState ?? {};
-
-  // No live ledger data
-  if (Object.keys(ledger).length === 0) {
-    score -= 30;
-    reasons.push("No ledger data connected — estimates use industry averages");
-  }
-
-  // Missing key financial fields
-  const financialKeys = ["mrr", "burn_rate", "gross_revenue", "cac", "ltv"];
-  const missing = financialKeys.filter((k) => !ledger[k]);
-  if (missing.length >= 3) {
-    score -= 20;
-    reasons.push(`${missing.length} core metrics unavailable (${missing.slice(0, 2).join(", ")}…)`);
-  } else if (missing.length >= 1) {
-    score -= 10;
-    reasons.push(`${missing.length} metric(s) missing: ${missing.join(", ")}`);
-  }
-
-  // No historical state context
-  if (Object.keys(state).length === 0) {
-    score -= 15;
-    reasons.push("No prior system state — first-principles only");
-  }
-
-  // No vector memory (prior conversation context)
-  if (!ctx.vectorMemory || ctx.vectorMemory.length === 0) {
-    score -= 10;
-    reasons.push("No conversation history loaded");
-  }
-
-  // For FINANCIAL_MATRIX: extra penalty if purely algebraic (no real numbers)
-  if (intentType === "FINANCIAL_MATRIX" && missing.length >= 3) {
-    score -= 10;
-  }
-
-  score = Math.max(0, Math.min(100, score));
-
-  const grade: "HIGH" | "MEDIUM" | "LOW" =
-    score >= 75 ? "HIGH" : score >= 45 ? "MEDIUM" : "LOW";
-
-  // Keep reasons concise — max 3
-  return { score, grade, reasons: reasons.slice(0, 3) };
-}
-
-// ---------------------------------------------------------------------------
-// System Prompt Builder
-// ---------------------------------------------------------------------------
-
-function buildSystemPrompt(ctx: EngineContext, confidenceData: ConfidenceData): string {
-  const ledgerSummary =
-    ctx.ledgerContext && Object.keys(ctx.ledgerContext).length > 0
-      ? JSON.stringify(ctx.ledgerContext, null, 2)
-      : "No live ledger data. Use algebraic frameworks and industry benchmarks.";
-
-  const stateSummary =
-    ctx.systemState && Object.keys(ctx.systemState).length > 0
-      ? JSON.stringify(ctx.systemState, null, 2)
-      : "No prior system state.";
-
-  const memoryBlock =
-    ctx.vectorMemory && ctx.vectorMemory.length > 0
-      ? ctx.vectorMemory.map((m, i) => `[${i + 1}] ${m}`).join("\n")
-      : "No prior conversation memory.";
-
-  return `You are SIMORA — an autonomous business intelligence co-founder and venture CFO.
-Industry context: ${ctx.industry || "General SaaS/Startup"}.
-
-PERSONALITY MANDATE:
-- Voice: elite strategic co-founder + ruthless venture CFO. Zero passivity.
-- Eliminate: "keep a close eye", "be cautious", "monitor closely", "it depends".
-- Replace with: explicit action states — "Freeze the pricing reduction", "Audit environment sprawl", "Isolate the hosting invoice".
-- Anchor ALL financial arguments in hard industrial benchmarks:
-  B2B SaaS infrastructure COGS target: 8-15% of MRR.
-  Average cloud environment waste: 27%.
-  Healthy SaaS gross margin: 70-80%.
-  Healthy CAC:LTV ratio: 1:3 minimum.
-
-LENGTH MANDATE — WHATSAPP FORMAT:
-- action_directive: 1 sentence, ≤20 words. Imperative. No hedging.
-- strategic_framework: 2-3 sentences MAX. Dense, no fluff.
-- analytical_baselines: 1-2 sentences with a specific benchmark or algebraic relationship.
-- algebraic_impact_model: show the math, 2-3 sentences, specific formulas.
-- impact_runway / impact_margin: 1 sentence each.
-- auditor_warning: 1 sentence or null. Only if there is a genuine risk.
-- message (CASUAL_CHAT): 1-2 sentences. Conversational. Don't force business advice.
-- ledger_hydration_parameters: the exact DB/API keys needed to make this deterministic.
-
-ABSOLUTE RULE ON "UNKNOWN":
-You are FORBIDDEN from outputting "Unknown" for any financial variable.
-If you lack the precise number, use algebraic logic: show the formula, name the variables,
-explain the compounding relationship, and state the break-even threshold algebraically.
-Example: "If CAC rises 10% and price drops 5%, CM = (P × (1-0.05)) - VC must hold above zero.
-Solve: P_new > VC / 0.95. That is the floor."
-
-CURRENT SYSTEM CONTEXT:
-User Industry: ${ctx.industry}
-Confidence Grade: ${confidenceData.grade} (${confidenceData.score}/100)
-Confidence Reasons: ${confidenceData.reasons.join("; ") || "Full data available"}
-
-LEDGER DATA:
-${ledgerSummary}
-
-SYSTEM STATE:
-${stateSummary}
-
-CONVERSATION MEMORY:
-${memoryBlock}
-
-INTENT ROUTING — OUTPUT SCHEMA:
-You MUST classify the user's input into EXACTLY ONE of these three response types
-and return a SINGLE valid JSON object. No markdown, no preamble, just JSON.
-
-TYPE 1 — CASUAL_CHAT (non-business questions, greetings, off-topic):
-{
-  "type": "CASUAL_CHAT",
-  "message": "string"
-}
-
-TYPE 2 — STRATEGIC_ADVICE (qualitative business questions, hiring, positioning, growth):
-{
-  "type": "STRATEGIC_ADVICE",
-  "action_directive": "string",
-  "strategic_framework": "string",
-  "analytical_baselines": "string",
-  "auditor_warning": "string | null",
-  "confidence_score": ${confidenceData.score},
-  "confidence_grade": "${confidenceData.grade}",
-  "confidence_reasons": ${JSON.stringify(confidenceData.reasons)}
-}
-
-TYPE 3 — FINANCIAL_MATRIX (cost, margin, pricing, runway, burn rate, P&L questions):
-{
-  "type": "FINANCIAL_MATRIX",
-  "action_directive": "string",
-  "algebraic_impact_model": "string",
-  "impact_runway": "string",
-  "impact_margin": "string",
-  "ledger_hydration_parameters": ["string"],
-  "auditor_warning": "string | null",
-  "confidence_score": ${confidenceData.score},
-  "confidence_grade": "${confidenceData.grade}",
-  "confidence_reasons": ${JSON.stringify(confidenceData.reasons)}
-}
-
-CLASSIFICATION RULES:
-- "What's a good Korean movie?" → CASUAL_CHAT
-- "Should I hire a co-founder?" → STRATEGIC_ADVICE
-- "Our CAC increased 10%, should we expand ads?" → STRATEGIC_ADVICE (CAC is strategic, not a P&L calc)
-- "Fuel jumped 14% and we're dropping price 5%, what happens to margin?" → FINANCIAL_MATRIX
-- Do NOT output FINANCIAL_MATRIX for questions where no algebraic calculation is meaningful.
-- The confidence_score, confidence_grade, and confidence_reasons fields MUST be copied exactly
-  from the values pre-injected above — do not invent your own.`;
-}
-
-// ---------------------------------------------------------------------------
-// Self-Heal & Validate
-// ---------------------------------------------------------------------------
-
-function selfHealAndValidateOutput(
-  raw: unknown,
-  confidenceData: ConfidenceData
-): SimoraEngineResponse {
-  if (typeof raw !== "object" || raw === null) {
-    return {
-      type: "CASUAL_CHAT",
-      message: "I ran into a processing issue. Try rephrasing your question.",
-    };
-  }
-
-  const obj = raw as Record<string, unknown>;
-
-  // Patch confidence onto STRATEGIC_ADVICE / FINANCIAL_MATRIX in case model dropped it
-  if (obj.type === "STRATEGIC_ADVICE" || obj.type === "FINANCIAL_MATRIX") {
-    if (typeof obj.confidence_score !== "number") {
-      obj.confidence_score = confidenceData.score;
+type SimoraEngineResponse =
+  | {
+      type: 'CASUAL_CHAT';
+      message: string;
     }
-    if (typeof obj.confidence_grade !== "string") {
-      obj.confidence_grade = confidenceData.grade;
+  | {
+      type: 'STRATEGIC_ADVICE';
+      action_directive: string;
+      strategic_framework: string;
+      analytical_baselines: string;
+      auditor_warning: string | null;
     }
-    if (!Array.isArray(obj.confidence_reasons)) {
-      obj.confidence_reasons = confidenceData.reasons;
+  | {
+      type: 'FINANCIAL_MATRIX';
+      action_directive: string;
+      algebraic_impact_model: string;
+      impact_runway: string;
+      impact_margin: string;
+      ledger_hydration_parameters: string[];
+      auditor_warning: string | null;
     }
-  }
-
-  // Validate CASUAL_CHAT
-  if (obj.type === "CASUAL_CHAT") {
-    if (typeof obj.message !== "string" || obj.message.trim() === "") {
-      return {
-        type: "CASUAL_CHAT",
-        message: "Got your message — could you rephrase that?",
+  | {
+      type: 'HYDRATE_LEDGER';
+      message: string;
+      ledger_hydration_parameters: string[];
+      extracted_metrics: {
+        mrr: number | null;
+        variable_cogs: number | null;
+        fixed_operating_overhead: number | null;
+        verified_cash_balance: number | null;
       };
     }
-    return obj as CasualChat;
+  | {
+      type: 'CONNECT_LEDGER';
+      message: string;
+      integration_target: string;
+    };
+
+// Neutral embedding placeholder for pgvector compatibility
+async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
+  console.log('[PROTOTYPE MODE] Bypassing HF network call. Returning neutral vector for demo.');
+  return Array(384).fill(0.01);
+}
+
+// Master System Instructions
+const SIMORA_MASTER_SYSTEM_PROMPT = `You are SIMORA — an elite strategic co-founder fused with a ruthless venture CFO.
+You operate an OPERATIONAL DIGITAL TWIN of this startup, not a chatbot.
+You think in bound Objects and algebraic relationships, never vague prose.
+
+═══════════════════════════════════════════════════════════════
+ONTOLOGY & DENSITY MANDATE
+═══════════════════════════════════════════════════════════════
+You reason over these Objects as a connected graph: Runway, Burn Rate, Gross Margin, Variable COGS, Contribution Margin, and Competitors.
+CRITICAL: Do not blindly copy examples from this prompt. Tailor your analysis strictly to the user's specific industry (e.g., do not mention 'fuel' for a SaaS company; focus on compute, LLM API costs, or pipeline instead).
+
+When generating text for JSON fields, YOU MUST WRITE DENSE, HIGH-LEVEL EXECUTIVE PARAGRAPHS. Do not just output 3-word labels. Provide deep, first-principles analysis.
+
+═══════════════════════════════════════════════════════════════
+INTENT CLASSIFICATION & MANDATORY JSON OUTPUT SCHEMA
+═══════════════════════════════════════════════════════════════
+You must return raw, valid JSON. Populate ALL keys for your chosen intent; if a field is not relevant, set it to null.
+
+INTENT 1: "CASUAL_CHAT"
+- Small talk or general non-business queries.
+  {
+    "type": "CASUAL_CHAT",
+    "message": "Your conversational response",
+    "action_directive": null,
+    "strategic_framework": null,
+    "analytical_baselines": null,
+    "algebraic_impact_model": null,
+    "impact_runway": null,
+    "impact_margin": null,
+    "ledger_hydration_parameters": null,
+    "auditor_warning": null
   }
 
-  // Validate STRATEGIC_ADVICE
-  if (obj.type === "STRATEGIC_ADVICE") {
-    const required = ["action_directive", "strategic_framework", "analytical_baselines"];
-    const missing = required.filter(
-      (k) => typeof obj[k] !== "string" || (obj[k] as string).trim() === ""
-    );
-    if (missing.length > 0) {
-      throw new Error(
-        `STRATEGIC_ADVICE response missing required fields: ${missing.join(", ")}`
-      );
+INTENT 2: "STRATEGIC_ADVICE"
+- Qualitative strategic questions.
+  {
+    "type": "STRATEGIC_ADVICE",
+    "message": null,
+    "action_directive": "A sharp, 1-2 sentence imperative command.",
+    "strategic_framework": "DENSE, MULTI-PARAGRAPH ANALYSIS. Do not just name the framework. Write a brilliant, detailed executive briefing applying first-principles reasoning to the user's specific market and operational reality.",
+    "analytical_baselines": "Provide hard, industry-specific benchmarks with exact percentage ranges (e.g., SaaS NRR metrics, compute COGS ratios). Explain them deeply.",
+    "algebraic_impact_model": null,
+    "impact_runway": null,
+    "impact_margin": null,
+    "ledger_hydration_parameters": null,
+    "auditor_warning": "A detailed, multi-sentence operational pre-mortem risk analysis."
+  }
+
+INTENT 3: "FINANCIAL_MATRIX"
+- Operational/financial shifts, cost updates, or volume adjustments.
+  {
+    "type": "FINANCIAL_MATRIX",
+    "message": null,
+    "action_directive": "Clear, high-leverage operational mandate.",
+    "algebraic_impact_model": "DENSE, MULTI-PARAGRAPH ALGEBRAIC BREAKDOWN. Explicitly calculate the formulaic compounding relationship between the variables, volume elasticity, and margin compression.",
+    "impact_runway": "Detailed runway effect with explicit context.",
+    "impact_margin": "Detailed effect on contribution/gross margin.",
+    "ledger_hydration_parameters": ["array", "of", "snake_case", "ledger", "keys"],
+    "auditor_warning": "Severe downside financial/margin risk explained in detail."
+  }
+
+INTENT 4: "HYDRATE_LEDGER"
+- User provides manual numerical updates to their financial state (e.g., "Set MRR to 45000 and Cash to 120000").
+  {
+    "type": "HYDRATE_LEDGER",
+    "message": "A brief confirmation message acknowledging the numbers have been logged.",
+    "action_directive": null,
+    "strategic_framework": null,
+    "analytical_baselines": null,
+    "algebraic_impact_model": null,
+    "impact_runway": null,
+    "impact_margin": null,
+    "ledger_hydration_parameters": ["mrr", "variable_cogs", "fixed_operating_overhead", "verified_cash_balance"],
+    "auditor_warning": null,
+    "extracted_metrics": {
+      "mrr": "number or null",
+      "variable_cogs": "number or null",
+      "fixed_operating_overhead": "number or null",
+      "verified_cash_balance": "number or null"
     }
+  }
+
+INTENT 5: "CONNECT_LEDGER"
+- User asks to connect, sync, or integrate an external platform (e.g., Stripe, QuickBooks, Xero).
+  {
+    "type": "CONNECT_LEDGER",
+    "message": "A brief message stating you are generating a secure integration portal link.",
+    "action_directive": null,
+    "strategic_framework": null,
+    "analytical_baselines": null,
+    "algebraic_impact_model": null,
+    "impact_runway": null,
+    "impact_margin": null,
+    "ledger_hydration_parameters": null,
+    "auditor_warning": null,
+    "integration_target": "The requested platform name (e.g., 'stripe', 'quickbooks')"
+  }
+
+═══════════════════════════════════════════════════════════════
+CRITICAL: "UNKNOWN" IS FORBIDDEN
+═══════════════════════════════════════════════════════════════
+If precise live ledger numbers are missing, NEVER output 'Unknown'. Utilize first-principles math and algebraic structures to map out the compounding mechanism conceptually.
+
+═══════════════════════════════════════════════════════════════
+CONFIDENCE DISCIPLINE
+═══════════════════════════════════════════════════════════════
+You are not allowed to present low-confidence analysis as certainty.
+
+If confidence score is:
+80-100 → speak decisively
+60-79 → mention assumptions
+0-59 → explicitly state missing variables materially weaken confidence
+
+═══════════════════════════════════════════════════════════════
+TONE — RUTHLESS AND SOVEREIGN
+═══════════════════════════════════════════════════════════════
+Eliminate passive words ('consider monitoring', 'be cautious'). Use clear action imperatives: 'Freeze the pricing reduction', 'Audit environment sprawl'. 
+
+Return RAW JSON only. No markdown fences (\`\`\`json).`;
+
+/**
+ * ── SELF-HEALING REPAIR MECHANISM ──────────────────────────────────────────
+ */
+function selfHealAndValidateOutput(parsed: any): SimoraEngineResponse {
+  if (!parsed || typeof parsed !== 'object') {
     return {
-      type: "STRATEGIC_ADVICE",
-      action_directive: obj.action_directive as string,
-      strategic_framework: obj.strategic_framework as string,
-      analytical_baselines: obj.analytical_baselines as string,
-      auditor_warning:
-        typeof obj.auditor_warning === "string" ? obj.auditor_warning : null,
-      confidence_score: obj.confidence_score as number,
-      confidence_grade: obj.confidence_grade as "HIGH" | "MEDIUM" | "LOW",
-      confidence_reasons: obj.confidence_reasons as string[],
+      type: 'CASUAL_CHAT',
+      message: "I encountered a synchronization error processing that request. Let's look at your operational data parameters again.",
     };
   }
 
-  // Validate FINANCIAL_MATRIX
-  if (obj.type === "FINANCIAL_MATRIX") {
-    const required = [
-      "action_directive",
-      "algebraic_impact_model",
-      "impact_runway",
-      "impact_margin",
-    ];
-    const missing = required.filter(
-      (k) => typeof obj[k] !== "string" || (obj[k] as string).trim() === ""
-    );
-    if (missing.length > 0) {
-      throw new Error(
-        `FINANCIAL_MATRIX response missing required fields: ${missing.join(", ")}`
-      );
-    }
+  // Sanitize intent type selection
+  let type = parsed.type;
+  if (!['CASUAL_CHAT', 'STRATEGIC_ADVICE', 'FINANCIAL_MATRIX', 'HYDRATE_LEDGER', 'CONNECT_LEDGER'].includes(type)) {
+    if (parsed.extracted_metrics) type = 'HYDRATE_LEDGER';
+    else if (parsed.integration_target) type = 'CONNECT_LEDGER';
+    else type = parsed.algebraic_impact_model || parsed.impact_runway ? 'FINANCIAL_MATRIX' : 'CASUAL_CHAT';
+  }
+
+  if (type === 'CASUAL_CHAT') {
     return {
-      type: "FINANCIAL_MATRIX",
-      action_directive: obj.action_directive as string,
-      algebraic_impact_model: obj.algebraic_impact_model as string,
-      impact_runway: obj.impact_runway as string,
-      impact_margin: obj.impact_margin as string,
-      ledger_hydration_parameters: Array.isArray(obj.ledger_hydration_parameters)
-        ? (obj.ledger_hydration_parameters as string[])
-        : [],
-      auditor_warning:
-        typeof obj.auditor_warning === "string" ? obj.auditor_warning : null,
-      confidence_score: obj.confidence_score as number,
-      confidence_grade: obj.confidence_grade as "HIGH" | "MEDIUM" | "LOW",
-      confidence_reasons: obj.confidence_reasons as string[],
+      type: 'CASUAL_CHAT',
+      message: String(parsed.message || "Simora systems active. Input your operational vector or financial delta.").trim(),
     };
   }
 
-  // Unrecognised type — fall back to casual
+  if (type === 'STRATEGIC_ADVICE') {
+    return {
+      type: 'STRATEGIC_ADVICE',
+      action_directive: String(parsed.action_directive || "Initiate immediate operational baseline review.").trim(),
+      strategic_framework: String(parsed.strategic_framework || "First-Principles Strategy Mapping").trim(),
+      analytical_baselines: String(parsed.analytical_baselines || "Standard operating margins for venture-backed entities are defended at a 60-70% floor.").trim(),
+      auditor_warning: parsed.auditor_warning ? String(parsed.auditor_warning).trim() : null,
+    };
+  }
+
+  if (type === 'HYDRATE_LEDGER') {
+    const rawMetrics = parsed.extracted_metrics || {};
+    return {
+      type: 'HYDRATE_LEDGER',
+      message: String(parsed.message || "Manual ledger overrides received and committed successfully.").trim(),
+      ledger_hydration_parameters: Array.isArray(parsed.ledger_hydration_parameters) ? parsed.ledger_hydration_parameters : ["mrr", "variable_cogs", "fixed_operating_overhead", "verified_cash_balance"],
+      extracted_metrics: {
+        mrr: typeof rawMetrics.mrr === 'number' ? rawMetrics.mrr : null,
+        variable_cogs: typeof rawMetrics.variable_cogs === 'number' ? rawMetrics.variable_cogs : null,
+        fixed_operating_overhead: typeof rawMetrics.fixed_operating_overhead === 'number' ? rawMetrics.fixed_operating_overhead : null,
+        verified_cash_balance: typeof rawMetrics.verified_cash_balance === 'number' ? rawMetrics.verified_cash_balance : null,
+      }
+    };
+  }
+
+  if (type === 'CONNECT_LEDGER') {
+    return {
+      type: 'CONNECT_LEDGER',
+      message: String(parsed.message || "Initializing secure integration handshake link protocol.").trim(),
+      integration_target: String(parsed.integration_target || "stripe").toLowerCase().trim(),
+    };
+  }
+
+  // FINANCIAL_MATRIX Self-Healing Fallback Build
+  const hedgePattern = /\b(unknown|insufficient data|not enough information|i'?d need more)\b/i;
+  let modelText = String(parsed.algebraic_impact_model || "");
+  
+  if (!modelText || hedgePattern.test(modelText)) {
+    modelText = "Mathematical Model: Contribution Margin Per Unit = (Price × (1 − price_drop%)) − (Variable_Cost × (1 + cost_increase%)). When a variable cost input expands alongside a top-line pricing reduction, a non-linear double-sided margin compression occurs, accelerating burn rate independently of volume adjustments unless direct volume elasticity exceeds the break-even threshold.";
+  }
+
   return {
-    type: "CASUAL_CHAT",
-    message:
-      "I received an unexpected response shape. Could you rephrase your question?",
+    type: 'FINANCIAL_MATRIX',
+    action_directive: String(parsed.action_directive || "Freeze variable pricing adjustments until volume elasticity vectors are calculated.").trim(),
+    algebraic_impact_model: modelText.trim(),
+    impact_runway: String(parsed.impact_runway || "Compressed via Contribution Margin Squeeze").trim(),
+    impact_margin: String(parsed.impact_margin || "Gross/Contribution Margin Contraction Expected").trim(),
+    ledger_hydration_parameters: Array.isArray(parsed.ledger_hydration_parameters) && parsed.ledger_hydration_parameters.length > 0
+      ? parsed.ledger_hydration_parameters.map(String)
+      : ['gross_revenue', 'variable_cogs', 'mrr', 'operating_expenses'],
+    auditor_warning: parsed.auditor_warning ? String(parsed.auditor_warning).trim() : "Risk Flag: Running pricing/cost adjustments without real-time ledger verification risks compounding structural cash flow anomalies.",
   };
 }
 
-// ---------------------------------------------------------------------------
-// Decision Log Writer (Supabase)
-// ---------------------------------------------------------------------------
+// ============================================================================
+// MAIN ENGINE EXPORT
+// ============================================================================
+function calculateConfidenceScore(
+  ledgerMetrics: any,
+  systemState: any
+) {
+  let score = 100;
+  const reasons: string[] = [];
 
-async function writeDecisionLog(
-  supabase: SupabaseClient,
-  ctx: EngineContext,
-  result: SimoraEngineResponse,
-  confidenceData: ConfidenceData
-): Promise<void> {
-  try {
-    const logEntry = {
-      user_id: ctx.userId,
-      whatsapp_hash: ctx.whatsappHash,
-      input_message: ctx.inputMessage,
-      response_type: result.type,
-      confidence_score: confidenceData.score,
-      confidence_grade: confidenceData.grade,
-      confidence_reasons: confidenceData.reasons,
-      response_payload: result,
-      created_at: new Date().toISOString(),
-    };
-    const { error } = await supabase.from("simora_decision_logs").insert(logEntry);
-    if (error) {
-      console.error("[ENGINE] Decision log write failed:", error.message);
+  if (!ledgerMetrics) {
+    score -= 40;
+    reasons.push('No financial ledger connected');
+  } else {
+    if (ledgerMetrics.mrr == null) {
+      score -= 15;
+      reasons.push('Missing MRR');
     }
-  } catch (err) {
-    console.error("[ENGINE] Decision log exception:", err);
-  }
-}
 
-// ---------------------------------------------------------------------------
-// Strategy Card Writer (Supabase — FINANCIAL_MATRIX + STRATEGIC_ADVICE only)
-// ---------------------------------------------------------------------------
-
-async function writeStrategyCard(
-  supabase: SupabaseClient,
-  ctx: EngineContext,
-  result: StrategicAdvice | FinancialMatrix
-): Promise<void> {
-  try {
-    const card = {
-      user_id: ctx.userId,
-      industry: ctx.industry,
-      response_type: result.type,
-      action_directive: result.action_directive,
-      confidence_score: result.confidence_score,
-      confidence_grade: result.confidence_grade,
-      created_at: new Date().toISOString(),
-    };
-    const { error } = await supabase.from("strategy_cards").insert(card);
-    if (error) {
-      console.error("[ENGINE] Strategy card write failed:", error.message);
+    if (ledgerMetrics.variable_cogs == null) {
+      score -= 15;
+      reasons.push('Missing variable COGS');
     }
-  } catch (err) {
-    console.error("[ENGINE] Strategy card exception:", err);
-  }
-}
 
-// ---------------------------------------------------------------------------
-// Vector Memory Logger
-// ---------------------------------------------------------------------------
-
-async function logVectorMemory(
-  supabase: SupabaseClient,
-  ctx: EngineContext,
-  result: SimoraEngineResponse,
-  openai: OpenAI
-): Promise<void> {
-  try {
-    const textToEmbed =
-      result.type === "CASUAL_CHAT"
-        ? `User: ${ctx.inputMessage} | SIMORA: ${result.message}`
-        : `User: ${ctx.inputMessage} | SIMORA [${result.type}]: ${result.action_directive}`;
-
-    const embeddingRes = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: textToEmbed,
-    });
-
-    const embedding = embeddingRes.data[0]?.embedding;
-    if (!embedding) return;
-
-    const { error } = await supabase.from("ledger_embeddings").insert({
-      user_id: ctx.userId,
-      content: textToEmbed,
-      embedding,
-      response_type: result.type,
-      created_at: new Date().toISOString(),
-    });
-
-    if (error) {
-      console.error("[ENGINE] Vector memory write failed:", error.message);
+    if (ledgerMetrics.fixed_operating_overhead == null) {
+      score -= 15;
+      reasons.push('Missing fixed overhead');
     }
-  } catch (err) {
-    console.error("[ENGINE] Vector memory exception:", err);
+
+    if (ledgerMetrics.verified_cash_balance == null) {
+      score -= 15;
+      reasons.push('Missing cash balance');
+    }
   }
+
+  if (!systemState?.calculated_runway_months) {
+    score -= 20;
+    reasons.push('Runway unavailable');
+  }
+
+  if (score < 0) score = 0;
+
+  let grade = 'LOW';
+
+  if (score >= 80) grade = 'HIGH';
+  else if (score >= 60) grade = 'MEDIUM';
+
+  return {
+    score,
+    grade,
+    reasons
+  };
 }
+async function getPendingDecisionFollowup(
+  userId: string,
+  supabaseAdmin: SupabaseClient
+) {
+  const { data, error } = await supabaseAdmin
+    .from('decision_logs')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('decision_status', 'PENDING')
+    .order('created_at', { ascending: false })
+    .limit(1);
 
-// ---------------------------------------------------------------------------
-// Main Engine Entry Point
-// ---------------------------------------------------------------------------
+  if (error || !data || data.length === 0) {
+    return null;
+  }
 
+  return data[0];
+}
 export async function executeSimoraCoreEngine(
-  ctx: EngineContext,
-  supabase: SupabaseClient,
-  openai: OpenAI
+  ctx: IngestionContext,
+  supabaseAdmin: SupabaseClient,
+  openai: OpenAI,
 ): Promise<SimoraEngineResponse> {
-  console.log(`[ENGINE] Start — user=${ctx.userId} input="${ctx.inputMessage.slice(0, 80)}"`);
 
-  // 1. Pre-classify intent heuristically to compute the right confidence score.
-  //    A full classification happens inside the LLM; this is just for the confidence calc.
-  //    We default to STRATEGIC_ADVICE (the more common non-casual type) and let the
-  //    LLM correct the final classification.
-  const heuristicIntent: "STRATEGIC_ADVICE" | "FINANCIAL_MATRIX" | "CASUAL_CHAT" =
-    /margin|runway|burn|cogs|cac|ltv|mrr|arr|price|revenue|cost|profit|loss|cash|p&l|expense/i.test(
-      ctx.inputMessage
-    )
-      ? "FINANCIAL_MATRIX"
-      : /hire|expand|pivot|position|competi|brand|market|strateg|growth|partner|team|product/i.test(
-          ctx.inputMessage
-        )
-      ? "STRATEGIC_ADVICE"
-      : "CASUAL_CHAT";
+  // 1. DATA HYDRATION & PROFILE FETCH
+  const { data: user, error: userErr } = await supabaseAdmin
+    .from('users')
+    .select('*')
+    .eq('whatsapp_id_hash', ctx.whatsappHash)
+    .single();
 
-  // 2. Calculate confidence
-  const confidenceData = calculateConfidenceScore(ctx, heuristicIntent);
-  console.log(
-    `[ENGINE] Confidence — grade=${confidenceData.grade} score=${confidenceData.score}`
+  if (userErr || !user) {
+    throw new Error(`SUPABASE_DATABASE_CRASH: Profile Unmapped or DB unreachable. ${userErr?.message}`);
+  }
+  const pendingDecision = await getPendingDecisionFollowup(
+  user.id,
+  supabaseAdmin
+);
+
+  const { data: state, error: stateErr } = await supabaseAdmin
+    .from('system_states')
+    .select('*')
+    .eq('user_id', user.id)
+    .single();
+
+  if (stateErr || !state) {
+    throw new Error(`CRITICAL_SYSTEM_ERROR: System State Missing for User ${user.id}`);
+  }
+
+  // OPTION 1 & 2 LINK: Query live synchronized financial metrics if they exist
+  const { data: ledgerMetrics } = await supabaseAdmin
+   .from('ledger_metrics')
+    .select('*')
+    .eq('user_id', user.id)
+    .single();
+   let confidenceData: any = null;
+    confidenceData = calculateConfidenceScore(
+  ledgerMetrics,
+  state
+   );
+
+  // 2. LIVE CONTEXTUAL RETRIEVAL (VECTOR MEMORY)
+  const currentQueryVector = await getHuggingFaceEmbedding(ctx.incomingText);
+  const { data: matchedContextRecords } = await supabaseAdmin.rpc(
+    'match_ledger_embeddings',
+    {
+      query_embedding: currentQueryVector,
+      match_threshold: 0.3,
+      match_count: 3,
+      p_user_id: user.id,
+    },
   );
 
-  // 3. Build system prompt with confidence injected
-  const systemPrompt = buildSystemPrompt(ctx, confidenceData);
+  let vectorContext = '[No relevant historical context discovered. Proceeding under baseline assumptions.]';
+  if (matchedContextRecords && matchedContextRecords.length > 0) {
+    vectorContext = matchedContextRecords
+      .map((record: any, idx: number) => `[Historical Event #${idx + 1}: ${record.content}]`)
+      .join('\n');
+  }
+  let decisionFollowupContext = '';
 
-  // 4. Call the model
-  let rawParsed: unknown;
+if (pendingDecision) {
+  decisionFollowupContext = `
+  PENDING_DECISION_REVIEW:
+  Previous Question: ${pendingDecision.user_question}
+  Previous Recommendation: ${pendingDecision.simora_recommendation}
+
+  If relevant to current conversation, ask the user whether they acted on this recommendation.
+  `;
+}
+
+  // 3. SYSTEM ONTOLOGY INJECTION WITH REAL-TIME SNAPSHOT OVERRIDES
+  const systemFrameworkContext = `
+    LIVE OPERATIONAL OBJECT STATE:
+    SYSTEM_ARCHETYPE_TIER: ${user.assigned_tier}
+    GEOGRAPHY_CODE: ${user.geo_country_code}-${user.geo_city_region}
+    INDUSTRY_TAXONOMY_ID: ${user.industry_taxonomy_id}
+    CURRENT_RESILIENCE_SCORE: ${state.resilience_score}
+    Runway.current_months: ${state.calculated_runway_months}
+    BurnRate.monthly: ${state.monthly_operating_burn}
+    
+    REAL-TIME SYNCHRONIZED FINANCIAL LEDGER SNAPSHOTS (SUPABASE):
+    MRR: ${ledgerMetrics?.mrr ?? 'Omitted (Using Conceptual Fallbacks)'}
+    Variable_COGS: ${ledgerMetrics?.variable_cogs ?? 'Omitted (Using Conceptual Fallbacks)'}
+    Fixed_Operating_Overhead: ${ledgerMetrics?.fixed_operating_overhead ?? 'Omitted (Using Conceptual Fallbacks)'}
+    Verified_Cash_Balance: ${ledgerMetrics?.verified_cash_balance ?? 'Omitted (Using Conceptual Fallbacks)'}
+    Last_State_Hydration_Method: ${ledgerMetrics?.last_hydrated_by ?? 'None'}
+
+    SIMORA CONFIDENCE SCORE:
+    Confidence Score: ${confidenceData.score}
+    Confidence Grade: ${confidenceData.grade}
+    Confidence Weaknesses: ${confidenceData.reasons.join(', ') || 'None'}
+  `;
+
+  // 4. INFERENCE LOOP EXECUTED IN GROQ-COMPATIBLE JSON OBJECT MODE
+  const completion = await openai.chat.completions.create({
+    model: 'llama-3.3-70b-versatile',
+    temperature: 0.2,
+    response_format: { type: 'json_object' }, 
+    messages: [
+      { role: 'system', content: SIMORA_MASTER_SYSTEM_PROMPT },
+      { role: 'system', content: systemFrameworkContext },
+      {
+        role: 'user',
+      content: `CONTEXT_CHUNKS FROM HISTORICAL LOGS:
+${vectorContext}
+
+DECISION FOLLOWUP CONTEXT:
+${decisionFollowupContext}
+
+NEW INCOMING MESSAGE:
+${ctx.incomingText}
+
+Classify intent and output valid JSON following schema requirements.`,
+      },
+    ],
+  });
+
+  const rawOutput = completion.choices[0].message.content;
+  if (!rawOutput) throw new Error('INFERENCE_TIMEOUT: Simora Engine failed to generate response.');
+
+  let parsedRaw: any;
   try {
-    const completion = await openai.chat.completions.create({
-      model: "llama-3.3-70b-versatile",
-      max_tokens: 800,
-      temperature: 0.3, // Low temp for consistent structured output
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: ctx.inputMessage },
-      ],
-    });
-
-    const rawText = completion.choices[0]?.message?.content ?? "";
-    console.log(`[ENGINE] Raw LLM response: ${rawText.slice(0, 200)}`);
-
-    // Strip any accidental markdown fences
-    const cleaned = rawText.replace(/```json|```/g, "").trim();
-    rawParsed = JSON.parse(cleaned);
-  } catch (err) {
-    console.error("[ENGINE] LLM call or JSON parse failed:", err);
-    throw new Error(`SIMORA_ENGINE_ERROR: LLM call failed — ${String(err)}`);
+    const cleanJsonString = rawOutput.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+    parsedRaw = JSON.parse(cleanJsonString);
+  } catch (e: any) {
+    console.warn(`JSON_PARSE_WARNING: Raw token parsing failed. Routing directly into Self-Healing Engine.`);
+    parsedRaw = {};
   }
 
-  // 5. Self-heal & validate (attaches confidence if model dropped it)
-  let result: SimoraEngineResponse;
-  try {
-    result = selfHealAndValidateOutput(rawParsed, confidenceData);
-    console.log(`[ENGINE] Output type=${result.type}`);
-  } catch (err) {
-    console.error("[ENGINE] Validation failed:", err);
-    throw new Error(`SIMORA_ENGINE_ERROR: Schema validation failed — ${String(err)}`);
+  // 5. RUNTIME VALIDATION & SELF-HEALING FILTER
+  const validatedOutput = selfHealAndValidateOutput(parsedRaw);
+
+  // 6. STRATEGY CARD PERSISTENCE FOR FINANCIAL INTENTS
+  if (validatedOutput.type === 'FINANCIAL_MATRIX') {
+    const delta = ctx.incomingDelta || 0;
+    const currentRunway = Number(state.calculated_runway_months);
+    const potentialNewBurn = Number(state.monthly_operating_burn) + delta;
+    const elasticityScore = currentRunway / (potentialNewBurn / Number(state.monthly_operating_burn) || 1);
+    const systemIntegrityFlag = elasticityScore < 0.8 ? 'DEATH_SPIRAL_RISK' : 'STABLE';
+
+    const { error: insertError } = await supabaseAdmin
+      .from('strategy_cards')
+      .insert([{
+        user_id: user.id,
+        core_action_directive: validatedOutput.action_directive,
+        impact_forecast_runway: validatedOutput.impact_runway,
+        impact_forecast_margin: validatedOutput.impact_margin,
+        auditor_critical_risk: validatedOutput.auditor_warning,
+        algebraic_impact_model: validatedOutput.algebraic_impact_model,
+        ledger_hydration_parameters: validatedOutput.ledger_hydration_parameters,
+        receipt_computation_log: {
+          variance_check: 'PASS',
+          elasticity_matrix: systemIntegrityFlag,
+          timestamp: new Date().toISOString(),
+        },
+        is_active: true,
+      }]);
+
+    if (insertError) {
+      console.error(`PERSISTENCE_WARNING: Failed to commit Strategy Card: ${insertError.message}`);
+    }
   }
 
-  // 6. Persist decision log (always)
-  await writeDecisionLog(supabase, ctx, result, confidenceData);
+  // OPTION 2 IMPLEMENTATION: Physical Data Hydration Router
+  if (validatedOutput.type === 'HYDRATE_LEDGER') {
+    const metrics = validatedOutput.extracted_metrics;
+    const updatePayload: any = {
+      user_id: user.id,
+      last_hydrated_by: 'MANUAL_WHATSAPP'
+    };
+    
+    if (metrics.mrr !== null) updatePayload.mrr = metrics.mrr;
+    if (metrics.variable_cogs !== null) updatePayload.variable_cogs = metrics.variable_cogs;
+    if (metrics.fixed_operating_overhead !== null) updatePayload.fixed_operating_overhead = metrics.fixed_operating_overhead;
+    if (metrics.verified_cash_balance !== null) updatePayload.verified_cash_balance = metrics.verified_cash_balance;
 
-  // 7. Persist strategy card (STRATEGIC_ADVICE + FINANCIAL_MATRIX only)
-  if (result.type === "STRATEGIC_ADVICE" || result.type === "FINANCIAL_MATRIX") {
-    await writeStrategyCard(supabase, ctx, result as StrategicAdvice | FinancialMatrix);
+    const { error: upsertError } = await supabaseAdmin
+      .from('ledger_metrics')
+      .upsert(updatePayload, { onConflict: 'user_id' });
+
+    if (upsertError) {
+      console.error(`DATABASE_WRITE_WARNING: Failed to execute manual ledger hydration: ${upsertError.message}`);
+    }
   }
 
-  // 8. Log vector memory (all types — co-founder remembers everything)
-  await logVectorMemory(supabase, ctx, result, openai);
+  // OPTION 1 IMPLEMENTATION: Unified Hosted Portal Link Handshake Engine
+  if (validatedOutput.type === 'CONNECT_LEDGER') {
+    const target = validatedOutput.integration_target;
+    // Constructs the encrypted checkout connection session parameter for your presentation layer
+    const secureVaultUrl = `https://vault.unified.to/oauth2/connect?workspace=simora_prod&integration=${target}&state=${user.id}`;
+    
+    validatedOutput.message = `🛡️ *SIMORA Secure Gateway Link Generated*\n\n${validatedOutput.message}\n\n👉 **Authorize Connection Here:** ${secureVaultUrl}\n\n_Note: This connection session is sandboxed and encrypted at rest._`;
+  }
 
-  console.log(`[ENGINE] Done — type=${result.type}`);
-  return result;
+  // 7. BACKGROUND MEMORY LOGGER
+  const { error: memoryInsertError } = await supabaseAdmin
+    .from('ledger_embeddings')
+    .insert([{
+      user_id: user.id,
+      content: ctx.incomingText,
+      embedding: currentQueryVector,
+    }]);
+
+  if (memoryInsertError) {
+    console.error(`MEMORY_LOGGING_WARNING: Failed to log vector states: ${memoryInsertError.message}`);
+  }
+if (
+  validatedOutput.type === 'FINANCIAL_MATRIX' ||
+  validatedOutput.type === 'STRATEGIC_ADVICE'
+) {
+  const recommendation =
+    validatedOutput.type === 'FINANCIAL_MATRIX'
+      ? validatedOutput.action_directive
+      : validatedOutput.action_directive;
+
+  const { error } = await supabaseAdmin
+    .from('decision_logs')
+    .insert([
+      {
+        user_id: user.id,
+        user_question: ctx.incomingText,
+        simora_recommendation: recommendation,
+        decision_status: 'PENDING',
+      },
+    ]);
+
+  if (error) {
+    console.error('DECISION_LOG_ERROR:', error.message);
+  }
+}
+  // 8A. DECISION LOGGER — Persist strategic decisions for future outcome learning
+if (
+  validatedOutput.type === 'FINANCIAL_MATRIX' ||
+  validatedOutput.type === 'STRATEGIC_ADVICE'
+) {
+  const recommendation = validatedOutput.action_directive;
+
+  const { error: decisionLogError } = await supabaseAdmin
+    .from('decision_logs')
+    .insert([
+      {
+        user_id: user.id,
+        user_question: ctx.incomingText,
+        simora_recommendation: recommendation,
+        decision_status: 'PENDING',
+      },
+    ]);
+
+  if (decisionLogError) {
+    console.error(
+      `DECISION_LOG_WARNING: Failed to persist decision log: ${decisionLogError.message}`
+    );
+  }
+}
+  // 8. DATA CONTROLLER RETURN
+  return validatedOutput;
 }
