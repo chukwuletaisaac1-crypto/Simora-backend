@@ -6,26 +6,46 @@ import dns from 'dns';
 dns.setDefaultResultOrder('ipv4first');
 
 /**
- * SIMORA CORE ENGINE — PHASE 3: CONFIDENCE-SCORED, WHATSAPP-DENSITY-CALIBRATED
+ * SIMORA CORE ENGINE — PHASE 4: DECISION INTELLIGENCE, PERSONA-AWARE
  * Path: ./src/engines/executeSimoraCoreEngine.ts
  *
- * Fixes two compounding problems from Phase 2:
+ * REPOSITIONING NOTE: SIMORA is not a "ruthless venture CFO." It is a
+ * decision intelligence system — it tracks decisions an organization makes,
+ * recalls them, and observes outcomes over time. The CFO framing from
+ * earlier phases gave every user the same fixed performance regardless of
+ * who was actually asking. This phase replaces that with: one honest core
+ * (recall → reason → confidence that matches reality) wrapped in a voice
+ * that adapts to who's asking (user_persona: FOUNDER | STUDENT | RESEARCHER).
+ * Tone flexes. Truth-telling about what's known vs. unknown does not.
  *
- * 1. CONFIDENCE SCORE WAS COMPUTED BUT NEVER RETURNED.
- *    calculateConfidenceScore() ran and was injected into the LLM's context
- *    as text, but no field in the response schema carried it back out to
- *    the caller. It was calculated, then silently dropped. This phase adds
- *    confidence_score / confidence_grade / confidence_reasons to the
- *    STRATEGIC_ADVICE and FINANCIAL_MATRIX response shapes ONLY — confidence
- *    isn't meaningful for casual chat or ledger/integration actions.
+ * FIXES IN THIS PHASE:
  *
- * 2. UNBOUNDED VERBOSITY. The Phase 2 prompt demanded "DENSE, MULTI-PARAGRAPH
- *    executive briefings" with no length ceiling, which produced multi-
- *    paragraph WhatsApp bubbles nobody reads on a busy day. This phase
- *    replaces that instruction with an explicit WhatsApp-density mandate:
- *    sharp, dense, CFO-grade reasoning, but capped at 2-3 sentences per
- *    field. Confidence scoring is what lets the model compress — instead of
- *    hedging across three paragraphs, it states a number and moves on.
+ * 1. CONFIDENCE BADGE CONTRADICTING ITS OWN CONTENT.
+ *    Real bug found: ledgerMetrics was fetched with .single(), which throws
+ *    when no ledger_metrics row exists yet for a user. Only `data` was
+ *    destructured, so the error was silently discarded and ledgerMetrics
+ *    came back `undefined` — calculateConfidenceScore() then sometimes saw
+ *    inconsistent state. Changed to .maybeSingle(), which returns null
+ *    (not an error) when no row exists. This is the actual root cause of
+ *    "Confidence: HIGH (80)" appearing next to "Runway unavailable."
+ *
+ * 2. PENDING-DECISION FOLLOWUP WAS HIJACKING auditor_warning.
+ *    The prompt previously told the model to fold "did you act on the
+ *    previous recommendation?" into auditor_warning — a field meant only
+ *    for genuine downside risk. This produced a guilt-trip-shaped warning
+ *    instead of a real risk. Recall is now its own dedicated optional field
+ *    (recall_opening) woven as a natural opening line, separate from risk.
+ *
+ * 3. RETRIEVAL QUESTIONS ("what did we discuss?") WERE ANSWERED WITH NEW
+ *    ADVICE INSTEAD OF AN ANSWER. Added an explicit instruction: if the
+ *    user is asking what was previously discussed/decided, answer that
+ *    literal question first, using vectorContext + pendingDecision, before
+ *    offering any new analysis. A pure recall question may even resolve to
+ *    CASUAL_CHAT if there's nothing new to analyze.
+ *
+ * 4. NO PERSONA AWARENESS. Added user_persona (FOUNDER | STUDENT |
+ *    RESEARCHER), set once at onboarding, injected into the prompt to
+ *    govern register only — never data honesty.
  */
 interface IngestionContext {
   userId: string;
@@ -40,6 +60,8 @@ interface ConfidenceData {
   reasons: string[];
 }
 
+type UserPersona = 'FOUNDER' | 'STUDENT' | 'RESEARCHER';
+
 type SimoraEngineResponse =
   | {
       type: 'CASUAL_CHAT';
@@ -47,6 +69,7 @@ type SimoraEngineResponse =
     }
   | {
       type: 'STRATEGIC_ADVICE';
+      recall_opening: string | null;
       action_directive: string;
       strategic_framework: string;
       analytical_baselines: string;
@@ -57,6 +80,7 @@ type SimoraEngineResponse =
     }
   | {
       type: 'FINANCIAL_MATRIX';
+      recall_opening: string | null;
       action_directive: string;
       algebraic_impact_model: string;
       impact_runway: string;
@@ -91,17 +115,44 @@ async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
 }
 
 // ============================================================================
-// MASTER SYSTEM PROMPT — WhatsApp-density calibrated
+// PERSONA VOICE BLOCKS
+// These change register ONLY. Every persona receives the same confidence
+// score, the same recall, the same refusal to fabricate "Unknown" — the
+// difference is how the answer is delivered, not what it contains.
 // ============================================================================
-const SIMORA_MASTER_SYSTEM_PROMPT = `You are SIMORA — an elite strategic co-founder fused with a ruthless venture CFO.
-You operate an OPERATIONAL DIGITAL TWIN of this startup, not a chatbot.
-You think in bound Objects and algebraic relationships, never vague prose.
+const PERSONA_VOICE_INSTRUCTIONS: Record<UserPersona, string> = {
+  FOUNDER: `VOICE: This person runs the business. They are reading this between other tasks and want the call, not the lecture. Lead with the directive. State the mechanism in one tight clause. Assume they already know their own business — don't over-explain context they live in every day.`,
+  STUDENT: `VOICE: This person is studying how businesses make decisions. They want to understand the mechanism, not just receive a directive. Still lead with a clear answer, but spend slightly more of your sentence budget on WHY the relationship holds (the causal chain), since understanding is the actual goal, not just compliance.`,
+  RESEARCHER: `VOICE: This person is examining how this system reasons. Surface your assumptions and the specific inputs (or missing inputs) driving the conclusion a bit more explicitly. Still stay within the density ceiling — this is not permission to write an essay — but make the reasoning chain legible, not just the conclusion.`,
+};
+
+function getPersonaVoiceBlock(persona: string | null | undefined): string {
+  const normalized = (persona || 'FOUNDER').toUpperCase() as UserPersona;
+  return PERSONA_VOICE_INSTRUCTIONS[normalized] || PERSONA_VOICE_INSTRUCTIONS.FOUNDER;
+}
+
+// ============================================================================
+// MASTER SYSTEM PROMPT
+// ============================================================================
+const SIMORA_MASTER_SYSTEM_PROMPT = `You are SIMORA — a decision intelligence system. You are not a CFO, not a generic chatbot, and not a personality performing confidence. Your actual job is narrower and more useful: track the decisions an organization makes, recall them accurately, reason about new inputs using the same operational ontology every time, and report your actual confidence honestly.
+
+═══════════════════════════════════════════════════════════════
+WHAT YOU ARE — AND ARE NOT
+═══════════════════════════════════════════════════════════════
+You are a decision intelligence system: you observe decisions, recall them, and reason over outcomes. You are NOT a "ruthless CFO persona" performing decisiveness regardless of what's actually known. Confidence language must always match the real data state injected below — if burn rate or runway is missing, you cannot speak as if you're certain about runway-dependent conclusions. Tone may be sharp; the underlying epistemic state must be honest.
 
 ═══════════════════════════════════════════════════════════════
 ONTOLOGY
 ═══════════════════════════════════════════════════════════════
 You reason over these Objects as a connected graph: Runway, Burn Rate, Gross Margin, Variable COGS, Contribution Margin, and Competitors.
 CRITICAL: Tailor analysis strictly to the user's specific industry (e.g., do not mention 'fuel' for a SaaS company; focus on compute, LLM API costs, or pipeline instead).
+
+═══════════════════════════════════════════════════════════════
+STEP ORDER — RECALL FIRST, THEN REASON
+═══════════════════════════════════════════════════════════════
+Before producing new analysis, check: is the user literally asking what was previously discussed or decided (e.g. "what was our last conversation about X," "what did we decide on Y")? If so, ANSWER THAT QUESTION FIRST AND DIRECTLY using the historical context and pending-decision data provided below. Do not respond to a recall question with fresh, unrelated advice instead of the recall itself. If there is genuinely nothing relevant in history, say so plainly rather than inventing new advice in its place — this may resolve to CASUAL_CHAT if there's no new analysis to perform.
+
+When a new scenario IS being analyzed and there is a relevant pending decision from a prior turn, weave a SHORT natural recall line into "recall_opening" — e.g. "Last time you froze the pricing call on fuel costs — did that hold?" This is a natural opening, not a compliance check, and it is NEVER placed inside auditor_warning. auditor_warning is reserved exclusively for a genuine downside risk in the current scenario. If there is no relevant pending decision, set recall_opening to null.
 
 ═══════════════════════════════════════════════════════════════
 DENSITY MANDATE — THIS IS A WHATSAPP MESSAGE, NOT A MEMO
@@ -113,10 +164,10 @@ Required in every field: one concrete claim, one number or named mechanism where
 
 A confidence score is provided to you below for this exact reason — when confidence is genuinely uncertain, STATE THE NUMBER, don't pad the prose to compensate. "62% confidence — CAC and COGS not yet synced" is a complete, sufficient hedge. A paragraph explaining why you're hedging is not.
 
-Example of REQUIRED density (do not exceed this length):
-"Freeze ad spend increases. A 10% CAC rise with flat LTV erodes payback period directly — expanding now compounds the problem before you've isolated the channel driving it."
-Example of FORBIDDEN density (never produce output like this):
-"The recent increase in Customer Acquisition Cost necessitates a thorough examination of the current marketing strategy and its ROI. Given industry shifts towards usage-based pricing models, it's crucial to assess whether the existing ad strategy aligns with these trends, and a detailed competitive landscape analysis should be conducted..."
+═══════════════════════════════════════════════════════════════
+PERSONA VOICE (register only — never changes data honesty)
+═══════════════════════════════════════════════════════════════
+{{PERSONA_VOICE_BLOCK}}
 
 ═══════════════════════════════════════════════════════════════
 INTENT CLASSIFICATION & MANDATORY JSON OUTPUT SCHEMA
@@ -124,38 +175,38 @@ INTENT CLASSIFICATION & MANDATORY JSON OUTPUT SCHEMA
 Return raw, valid JSON. Populate ALL keys for your chosen intent; if a field is not relevant, set it to null.
 
 INTENT 1: "CASUAL_CHAT"
-- Small talk or general non-business queries.
+- Small talk, general non-business queries, or a recall question where nothing relevant exists in history.
   {
     "type": "CASUAL_CHAT",
-    "message": "Your conversational response — 1-2 sentences, warm, no business jargon.",
+    "message": "Your response — 1-2 sentences. If this is answering 'nothing relevant was discussed before,' say so plainly here.",
     "action_directive": null, "strategic_framework": null, "analytical_baselines": null,
     "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null,
-    "ledger_hydration_parameters": null, "auditor_warning": null
+    "ledger_hydration_parameters": null, "auditor_warning": null, "recall_opening": null
   }
 
 INTENT 2: "STRATEGIC_ADVICE"
-- Qualitative strategic questions with no hard numeric shock to compute.
+- Qualitative strategic questions with no hard numeric shock to compute. ALSO used when answering a recall question that has a real answer (state the recall as the core of action_directive/strategic_framework if that's literally what was asked).
   {
     "type": "STRATEGIC_ADVICE",
-    "message": null,
-    "action_directive": "One sharp imperative sentence. Not a suggestion — a command.",
+    "recall_opening": "1 short clause naturally referencing a relevant pending decision, or null if none applies.",
+    "action_directive": "One sharp imperative sentence. Not a suggestion — a command. If this IS the answer to a recall question, state the recalled fact/decision directly here instead.",
     "strategic_framework": "MAX 2-3 sentences. Name the mechanism or framework and state its conclusion. No preamble.",
     "analytical_baselines": "MAX 1-2 sentences. One hard benchmark with an exact figure or range. No explanation of why benchmarks matter.",
     "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null, "ledger_hydration_parameters": null,
-    "auditor_warning": "MAX 1-2 sentences, or null if no material risk. The single sharpest downside — not a list."
+    "auditor_warning": "MAX 1-2 sentences, or null if no material risk. A genuine downside risk ONLY — never a compliance check or follow-up question."
   }
 
 INTENT 3: "FINANCIAL_MATRIX"
 - Operational/financial shifts, cost updates, or volume adjustments.
   {
     "type": "FINANCIAL_MATRIX",
-    "message": null,
-    "action_directive": "One sharp imperative sentence.",
+    "recall_opening": "1 short clause naturally referencing a relevant pending decision, or null if none applies.",
+    "action_directive": "One sharp imperative sentence. If a required input (burn rate, runway, etc.) is missing, name that gap as the reason for the directive, e.g. 'Can't size absorption — burn rate isn't synced. Directionally:' before the directive.",
     "algebraic_impact_model": "MAX 2-3 sentences. State the formulaic relationship and its compounding effect directly — show the mechanism, not a lecture about it.",
-    "impact_runway": "MAX 1 sentence. Direction + magnitude.",
+    "impact_runway": "MAX 1 sentence. Direction + magnitude, OR state plainly 'unavailable — burn rate not synced' if true. Never claim a number you don't have.",
     "impact_margin": "MAX 1 sentence. Direction + magnitude.",
     "ledger_hydration_parameters": ["array", "of", "snake_case", "ledger", "keys"],
-    "auditor_warning": "MAX 1-2 sentences, or null if no material risk."
+    "auditor_warning": "MAX 1-2 sentences, or null if no material risk. A genuine downside risk ONLY — never a compliance check or follow-up question."
   }
 
 INTENT 4: "HYDRATE_LEDGER"
@@ -166,7 +217,7 @@ INTENT 4: "HYDRATE_LEDGER"
     "action_directive": null, "strategic_framework": null, "analytical_baselines": null,
     "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null,
     "ledger_hydration_parameters": ["mrr", "variable_cogs", "fixed_operating_overhead", "verified_cash_balance"],
-    "auditor_warning": null,
+    "auditor_warning": null, "recall_opening": null,
     "extracted_metrics": { "mrr": "number or null", "variable_cogs": "number or null", "fixed_operating_overhead": "number or null", "verified_cash_balance": "number or null" }
   }
 
@@ -176,35 +227,30 @@ INTENT 5: "CONNECT_LEDGER"
     "type": "CONNECT_LEDGER",
     "message": "Brief, 1 sentence, stating you're generating a secure integration link.",
     "action_directive": null, "strategic_framework": null, "analytical_baselines": null,
-    "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null, "ledger_hydration_parameters": null, "auditor_warning": null,
+    "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null, "ledger_hydration_parameters": null, "auditor_warning": null, "recall_opening": null,
     "integration_target": "The requested platform name (e.g., 'stripe', 'quickbooks')"
   }
 
 ═══════════════════════════════════════════════════════════════
-"UNKNOWN" IS FORBIDDEN
+"UNKNOWN" IS FORBIDDEN — BUT FABRICATING CERTAINTY IS WORSE
 ═══════════════════════════════════════════════════════════════
-If precise live ledger numbers are missing, never output 'Unknown'. State the algebraic mechanism conceptually, in the same 2-3 sentence ceiling as above. The confidence score — not extra prose — is how you communicate uncertainty.
+If precise live ledger numbers are missing, never output the bare word 'Unknown' with nothing else. State the algebraic mechanism conceptually, name the specific missing input, and still give a directive. The confidence score communicates the uncertainty level — but the actual content of impact_runway/impact_margin must never assert a number or direction you don't have grounds for. "Unavailable — burn rate not synced" is correct and required when true. A confident-sounding number with no backing data is a worse failure than admitting the gap.
 
 ═══════════════════════════════════════════════════════════════
 CONFIDENCE DISCIPLINE
 ═══════════════════════════════════════════════════════════════
-A confidence score and grade are computed and injected into your context below. You do not need to restate or explain the score in your prose — it is rendered separately to the user. Let it govern your tone only:
+A confidence score and grade are computed from REAL missing-data checks and injected into your context below — this is not your discretion to override. Let it govern your tone only:
 80-100 (HIGH) → speak decisively, no hedging language at all.
 60-79 (MEDIUM) → one short clause naming the missing input is enough; do not over-qualify.
 0-59 (LOW) → name the single most material missing variable in one clause, then still give a directive. Never refuse to answer.
-
-═══════════════════════════════════════════════════════════════
-TONE — RUTHLESS AND SOVEREIGN
-═══════════════════════════════════════════════════════════════
-Eliminate passive words ('consider monitoring', 'be cautious', 'keep a close eye'). Use clear action imperatives: 'Freeze the pricing reduction', 'Audit environment sprawl', 'Isolate your hosting invoice'.
+The grade you are given already reflects whatever is missing — if it says MEDIUM or LOW, your prose must be consistent with that, not falsely decisive.
 
 Return RAW JSON only. No markdown fences (\`\`\`json).`;
 
 /**
  * ── SELF-HEALING REPAIR MECHANISM ──────────────────────────────────────────
- * Now also responsible for attaching confidenceData to STRATEGIC_ADVICE and
- * FINANCIAL_MATRIX responses — this is the fix for the score being computed
- * and then discarded.
+ * Now also responsible for attaching confidenceData and recall_opening to
+ * STRATEGIC_ADVICE and FINANCIAL_MATRIX responses.
  */
 function selfHealAndValidateOutput(parsed: any, confidenceData: ConfidenceData): SimoraEngineResponse {
   if (!parsed || typeof parsed !== 'object') {
@@ -222,7 +268,6 @@ function selfHealAndValidateOutput(parsed: any, confidenceData: ConfidenceData):
   }
 
   // Hard cap helper — enforces density even if the model ignores the prompt's word limits.
-  // Truncates on a sentence boundary where possible rather than mid-word.
   const capSentences = (text: string, maxSentences: number): string => {
     const trimmed = text.trim();
     const sentences = trimmed.match(/[^.!?]+[.!?]+/g) || [trimmed];
@@ -240,6 +285,7 @@ function selfHealAndValidateOutput(parsed: any, confidenceData: ConfidenceData):
   if (type === 'STRATEGIC_ADVICE') {
     return {
       type: 'STRATEGIC_ADVICE',
+      recall_opening: parsed.recall_opening ? capSentences(String(parsed.recall_opening), 1) : null,
       action_directive: capSentences(String(parsed.action_directive || "Run an immediate operational baseline review."), 1),
       strategic_framework: capSentences(String(parsed.strategic_framework || "First-principles structural review indicated."), 3),
       analytical_baselines: capSentences(String(parsed.analytical_baselines || "Venture-backed margin floors are typically defended at 60-70%."), 2),
@@ -285,6 +331,7 @@ function selfHealAndValidateOutput(parsed: any, confidenceData: ConfidenceData):
 
   return {
     type: 'FINANCIAL_MATRIX',
+    recall_opening: parsed.recall_opening ? capSentences(String(parsed.recall_opening), 1) : null,
     action_directive: capSentences(String(parsed.action_directive || "Freeze pricing adjustments until volume elasticity is modeled."), 1),
     algebraic_impact_model: capSentences(modelText, 3),
     impact_runway: capSentences(String(parsed.impact_runway || "Compressed via contribution margin squeeze."), 1),
@@ -321,6 +368,10 @@ function calculateConfidenceScore(ledgerMetrics: any, systemState: any): Confide
   if (!systemState?.calculated_runway_months) {
     score -= 20;
     reasons.push('Runway unavailable');
+  }
+  if (!systemState?.monthly_operating_burn) {
+    score -= 15;
+    reasons.push('Burn rate unavailable');
   }
 
   if (score < 0) score = 0;
@@ -377,13 +428,21 @@ export async function executeSimoraCoreEngine(
     throw new Error(`CRITICAL_SYSTEM_ERROR: System State Missing for User ${user.id}`);
   }
 
-  const { data: ledgerMetrics } = await supabaseAdmin
+  // ── BUG FIX: .single() throws when no ledger_metrics row exists yet for a
+  // new user. The error was previously discarded (only `data` destructured),
+  // leaving ledgerMetrics in an inconsistent state. .maybeSingle() returns
+  // null cleanly instead — this is the real fix for the HIGH/80 badge
+  // appearing next to "Runway unavailable" in the same message.
+  const { data: ledgerMetrics, error: ledgerErr } = await supabaseAdmin
     .from('ledger_metrics')
     .select('*')
     .eq('user_id', user.id)
-    .single();
+    .maybeSingle();
 
-  // ── This is the value that was previously computed and discarded ────────
+  if (ledgerErr) {
+    console.error(`[SIMORA ENGINE] ⚠️ ledger_metrics fetch error (non-fatal):`, ledgerErr.message);
+  }
+
   const confidenceData = calculateConfidenceScore(ledgerMetrics, state);
 
   // ── 2. LIVE CONTEXTUAL RETRIEVAL (VECTOR MEMORY) ─────────────────────────
@@ -408,11 +467,14 @@ export async function executeSimoraCoreEngine(
   let decisionFollowupContext = '';
   if (pendingDecision) {
     decisionFollowupContext = `
-    PENDING_DECISION_REVIEW:
+    PENDING_DECISION_REVIEW (use for recall_opening if relevant, NEVER inside auditor_warning):
     Previous Question: ${pendingDecision.user_question}
     Previous Recommendation: ${pendingDecision.simora_recommendation}
-    If relevant to current conversation, briefly ask in 1 clause whether the user acted on this.
+    If the current message is asking what was previously discussed/decided, this IS your answer — state it directly.
+    Otherwise, if relevant to the current scenario, weave a short natural reference into recall_opening only.
     `;
+  } else {
+    decisionFollowupContext = '[No pending decision on record. If the user is asking what was previously discussed, say plainly that nothing relevant is on record yet.]';
   }
 
   // ── 3. SYSTEM ONTOLOGY INJECTION WITH REAL-TIME SNAPSHOT OVERRIDES ───────
@@ -421,6 +483,7 @@ export async function executeSimoraCoreEngine(
     SYSTEM_ARCHETYPE_TIER: ${user.assigned_tier}
     GEOGRAPHY_CODE: ${user.geo_country_code}-${user.geo_city_region}
     INDUSTRY_TAXONOMY_ID: ${user.industry_taxonomy_id}
+    USER_PERSONA: ${user.user_persona ?? 'FOUNDER (default — not set during onboarding)'}
     CURRENT_RESILIENCE_SCORE: ${state.resilience_score}
     Runway.current_months: ${state.calculated_runway_months}
     BurnRate.monthly: ${state.monthly_operating_burn}
@@ -432,16 +495,16 @@ export async function executeSimoraCoreEngine(
     Verified_Cash_Balance: ${ledgerMetrics?.verified_cash_balance ?? 'Omitted (Using Conceptual Fallbacks)'}
     Last_State_Hydration_Method: ${ledgerMetrics?.last_hydrated_by ?? 'None'}
 
-    SIMORA CONFIDENCE SCORE (govern tone only — do not restate this in prose):
+    SIMORA CONFIDENCE SCORE (this is a REAL computed value reflecting the gaps above — do not contradict it):
     Confidence Score: ${confidenceData.score}
     Confidence Grade: ${confidenceData.grade}
     Confidence Weaknesses: ${confidenceData.reasons.join(', ') || 'None'}
   `;
 
+  const personaBlock = getPersonaVoiceBlock(user.user_persona);
+  const fullSystemPrompt = SIMORA_MASTER_SYSTEM_PROMPT.replace('{{PERSONA_VOICE_BLOCK}}', personaBlock);
+
   // ── 4. INFERENCE LOOP ─────────────────────────────────────────────────────
-  // DIAGNOSTIC INSTRUMENTATION: the API call itself is now wrapped so an
-  // auth/model/rate-limit failure surfaces with its real error message
-  // instead of throwing an unhandled exception the worker can't explain.
   let completion;
   try {
     completion = await openai.chat.completions.create({
@@ -449,7 +512,7 @@ export async function executeSimoraCoreEngine(
       temperature: 0.2,
       response_format: { type: 'json_object' },
       messages: [
-        { role: 'system', content: SIMORA_MASTER_SYSTEM_PROMPT },
+        { role: 'system', content: fullSystemPrompt },
         { role: 'system', content: systemFrameworkContext },
         {
           role: 'user',
@@ -462,24 +525,20 @@ ${decisionFollowupContext}
 NEW INCOMING MESSAGE:
 ${ctx.incomingText}
 
-Classify intent and output valid JSON following schema requirements. Respect the density ceiling strictly.`,
+Classify intent and output valid JSON following schema requirements. If this message is asking what was previously discussed or decided, answer that directly before anything else. Respect the density ceiling and persona voice strictly.`,
         },
       ],
     });
   } catch (apiErr: any) {
     console.error('[SIMORA ENGINE] ❌ LLM API call failed:', apiErr?.message || apiErr);
-    console.error('[SIMORA ENGINE] Full error object:', JSON.stringify(apiErr, Object.getOwnPropertyNames(apiErr || {})));
     throw new Error(`INFERENCE_API_ERROR: ${apiErr?.message || 'Unknown API failure'}`);
   }
 
   const rawOutput = completion.choices?.[0]?.message?.content;
-
-  // DIAGNOSTIC: always log the raw model output before any parsing attempt,
-  // so a malformed-JSON failure is visible in Railway logs instead of silent.
   console.log('[SIMORA ENGINE] Raw model output (first 1000 chars):', (rawOutput || '').slice(0, 1000));
 
   if (!rawOutput) {
-    console.error('[SIMORA ENGINE] ❌ Model returned empty content. Full completion object:', JSON.stringify(completion));
+    console.error('[SIMORA ENGINE] ❌ Model returned empty content.');
     throw new Error('INFERENCE_TIMEOUT: Simora Engine failed to generate response.');
   }
 
@@ -488,14 +547,12 @@ Classify intent and output valid JSON following schema requirements. Respect the
     const cleanJsonString = rawOutput.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim();
     parsedRaw = JSON.parse(cleanJsonString);
   } catch (e: any) {
-    // DIAGNOSTIC: this used to silently default to {} with no detail. Now
-    // logs the exact parse error and the exact string that failed to parse.
     console.error('[SIMORA ENGINE] ❌ JSON_PARSE_ERROR:', e.message);
     console.error('[SIMORA ENGINE] String that failed to parse:', rawOutput);
     parsedRaw = {};
   }
 
-  // ── 5. RUNTIME VALIDATION & SELF-HEALING FILTER (now confidence-aware) ───
+  // ── 5. RUNTIME VALIDATION & SELF-HEALING FILTER ──────────────────────────
   const validatedOutput = selfHealAndValidateOutput(parsedRaw, confidenceData);
 
   // ── 6. STRATEGY CARD PERSISTENCE FOR FINANCIAL INTENTS ───────────────────
@@ -567,7 +624,7 @@ Classify intent and output valid JSON following schema requirements. Respect the
     console.error(`MEMORY_LOGGING_WARNING: Failed to log vector states: ${memoryInsertError.message}`);
   }
 
-  // ── 10. DECISION LOGGER — single insert, deduplicated from Phase 2's accidental double-write ─
+  // ── 10. DECISION LOGGER ───────────────────────────────────────────────────
   if (validatedOutput.type === 'FINANCIAL_MATRIX' || validatedOutput.type === 'STRATEGIC_ADVICE') {
     const { error: decisionLogError } = await supabaseAdmin
       .from('decision_logs')
