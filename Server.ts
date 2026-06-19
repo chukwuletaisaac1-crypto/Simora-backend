@@ -109,9 +109,15 @@ function formatSimoraResponse(response: any): string {
 
     case 'STRATEGIC_ADVICE': {
       const badge = formatConfidenceBadge(response.confidence_grade, response.confidence_score);
-      const lines = [
-        badge,
-        '',
+      const lines = [badge, ''];
+
+      // recall_opening is a natural lead-in line, NOT a risk/compliance check.
+      // It only appears here, never folded into auditor_warning.
+      if (response.recall_opening) {
+        lines.push(`💭 ${response.recall_opening}`, '');
+      }
+
+      lines.push(
         `🎯 *Directive*`,
         response.action_directive || '',
         '',
@@ -120,7 +126,7 @@ function formatSimoraResponse(response: any): string {
         '',
         `📐 *Benchmarks*`,
         response.analytical_baselines || '',
-      ];
+      );
       if (response.auditor_warning) {
         lines.push('', `⚠️ *Risk*`, response.auditor_warning);
       }
@@ -129,9 +135,13 @@ function formatSimoraResponse(response: any): string {
 
     case 'FINANCIAL_MATRIX': {
       const badge = formatConfidenceBadge(response.confidence_grade, response.confidence_score);
-      const lines = [
-        badge,
-        '',
+      const lines = [badge, ''];
+
+      if (response.recall_opening) {
+        lines.push(`💭 ${response.recall_opening}`, '');
+      }
+
+      lines.push(
         `📊 *SIMORA ANALYSIS*`,
         '',
         `🎯 *Directive*`,
@@ -145,7 +155,7 @@ function formatSimoraResponse(response: any): string {
         '',
         `🧮 *Model*`,
         response.algebraic_impact_model || '',
-      ];
+      );
       if (response.auditor_warning) {
         lines.push('', `⚠️ *Risk*`, response.auditor_warning);
       }
@@ -620,12 +630,6 @@ const whatsappWorker = new Worker(
           TIER_ECOSYSTEM: 'ECOSYSTEM_NETWORK',
         };
 
-        const tierDescriptions: Record<string, string> = {
-          PIPELINE_BOTTLENECK: 'Pipeline Bottleneck — optimizes revenue conversion flow',
-          CHURN_LEAK:          'Churn Leak — identifies and plugs retention gaps',
-          ECOSYSTEM_NETWORK:   'Ecosystem Network — maps and scales partner dynamics',
-        };
-
         const selectedTier = tierMapping[interactive_reply_id];
 
         if (!selectedTier) {
@@ -636,10 +640,13 @@ const whatsappWorker = new Worker(
           return;
         }
 
+        // Tier is set, but onboarding is NOT yet complete — persona is the
+        // final step before ACTIVE. This is deliberate: SIMORA needs to know
+        // who it's talking to before it starts giving advice in any voice.
         const { error: updateErr } = await supabaseAdmin
           .from('users')
           .update({
-            current_routing_state: 'ACTIVE',
+            current_routing_state: 'AWAITING_PERSONA',
             assigned_tier:         selectedTier,
             updated_at:            new Date().toISOString(),
           })
@@ -650,13 +657,80 @@ const whatsappWorker = new Worker(
         await seedSystemState(user.id, selectedTier);
 
         await sendWhatsApp(from, {
+          type: 'interactive',
+          interactive: {
+            type:   'button',
+            header: { type: 'text', text: '🗣️ ONE LAST THING' },
+            body: {
+              text:
+                'How should I talk to you?\n\n' +
+                'This shapes how I phrase things — not what I tell you. The data and confidence behind every answer stay the same no matter what you pick.',
+            },
+            action: {
+              buttons: [
+                { type: 'reply', reply: { id: 'PERSONA_FOUNDER',    title: '🚀 Founder'    } },
+                { type: 'reply', reply: { id: 'PERSONA_STUDENT',    title: '🎓 Student'    } },
+                { type: 'reply', reply: { id: 'PERSONA_RESEARCHER', title: '🔬 Researcher' } },
+              ],
+            },
+          },
+        });
+
+        break;
+      }
+
+      // ── PERSONA — final onboarding step, governs voice only ──────────────
+      case 'AWAITING_PERSONA': {
+        if (!interactive_reply_id) {
+          await sendWhatsApp(from, {
+            type: 'text',
+            text: { body: '👆 Please pick one using the buttons above.' },
+          });
+          return;
+        }
+
+        const personaMapping: Record<string, string> = {
+          PERSONA_FOUNDER:    'FOUNDER',
+          PERSONA_STUDENT:    'STUDENT',
+          PERSONA_RESEARCHER: 'RESEARCHER',
+        };
+
+        const tierDescriptions: Record<string, string> = {
+          PIPELINE_BOTTLENECK: 'Pipeline Bottleneck — optimizes revenue conversion flow',
+          CHURN_LEAK:          'Churn Leak — identifies and plugs retention gaps',
+          ECOSYSTEM_NETWORK:   'Ecosystem Network — maps and scales partner dynamics',
+        };
+
+        const selectedPersona = personaMapping[interactive_reply_id];
+
+        if (!selectedPersona) {
+          await sendWhatsApp(from, {
+            type: 'text',
+            text: { body: '⚠️ Unrecognized selection. Please try again.' },
+          });
+          return;
+        }
+
+        const { error: personaUpdateErr } = await supabaseAdmin
+          .from('users')
+          .update({
+            current_routing_state: 'ACTIVE',
+            user_persona:          selectedPersona,
+            updated_at:            new Date().toISOString(),
+          })
+          .eq('id', user.id);
+
+        if (personaUpdateErr) throw new Error(`Persona update failed: ${personaUpdateErr.message}`);
+
+        await sendWhatsApp(from, {
           type: 'text',
           text: {
             body:
               '✅ *SIMORA ACTIVATED*\n\n' +
-              `*System Architecture:* ${tierDescriptions[selectedTier]}\n` +
+              `*System Architecture:* ${tierDescriptions[user.assigned_tier] || user.assigned_tier}\n` +
               `*Industry:* ${user.industry_taxonomy_id || 'General'}\n` +
-              `*Region:* ${user.geo_city_region || 'Global'}, ${user.geo_country_code || ''}\n\n` +
+              `*Region:* ${user.geo_city_region || 'Global'}, ${user.geo_country_code || ''}\n` +
+              `*Talking to you as:* ${selectedPersona}\n\n` +
               '🧠 Your intelligence matrix is online.\n\n' +
               'Send any business scenario, financial shift, or operational challenge.\n\n' +
               '_Example: "Fuel rose 14% and we want to cut pricing 5%. Can we absorb it?"_',
