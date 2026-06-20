@@ -130,6 +130,12 @@ function formatSimoraResponse(response: any): string {
       if (response.auditor_warning) {
         lines.push('', `⚠️ *Risk*`, response.auditor_warning);
       }
+      // Honest footer — only renders when an industry prior was substituted
+      // for real data. Keeps the assumption visible without padding every
+      // response when real ledger data was actually used.
+      if (Array.isArray(response.assumptions_used) && response.assumptions_used.length > 0) {
+        lines.push('', `📋 *Assumed:* ${response.assumptions_used.join('; ')}`);
+      }
       return lines.join('\n');
     }
 
@@ -158,6 +164,9 @@ function formatSimoraResponse(response: any): string {
       );
       if (response.auditor_warning) {
         lines.push('', `⚠️ *Risk*`, response.auditor_warning);
+      }
+      if (Array.isArray(response.assumptions_used) && response.assumptions_used.length > 0) {
+        lines.push('', `📋 *Assumed:* ${response.assumptions_used.join('; ')}`);
       }
       return lines.join('\n');
     }
