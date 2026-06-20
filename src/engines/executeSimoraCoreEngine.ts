@@ -74,6 +74,7 @@ type SimoraEngineResponse =
       strategic_framework: string;
       analytical_baselines: string;
       auditor_warning: string | null;
+      assumptions_used: string[];
       confidence_score: number;
       confidence_grade: 'HIGH' | 'MEDIUM' | 'LOW';
       confidence_reasons: string[];
@@ -87,6 +88,7 @@ type SimoraEngineResponse =
       impact_margin: string;
       ledger_hydration_parameters: string[];
       auditor_warning: string | null;
+      assumptions_used: string[];
       confidence_score: number;
       confidence_grade: 'HIGH' | 'MEDIUM' | 'LOW';
       confidence_reasons: string[];
@@ -112,6 +114,86 @@ type SimoraEngineResponse =
 async function getHuggingFaceEmbedding(text: string): Promise<number[]> {
   console.log('[PROTOTYPE MODE] Bypassing HF network call. Returning neutral vector for demo.');
   return Array(384).fill(0.01);
+}
+
+// ============================================================================
+// INDUSTRY PRIOR TABLES — PHASE 5
+//
+// HONESTY FLAG (read before editing): the specific numbers below are
+// directionally reasonable general-knowledge figures for each industry —
+// they are NOT sourced from an audited dataset specific to your company.
+// They exist so the engine can compute real math when a user hasn't synced
+// their actual ledger ("3 engineers × $X/month" instead of "increases burn
+// somewhat"), but every time one of these is used in place of a real number,
+// the engine is required (see ASSUMPTION-LABELING RULE in the prompt below)
+// to say so explicitly in its output — never silently substitute a prior for
+// real data without flagging it. Treat the VALUES here as a TODO: VERIFY —
+// a founder, analyst, or you should sanity-check these against real
+// benchmarks before they're trusted at face value in a live product.
+// Only the three industries explicitly scoped for this build are covered;
+// anything else falls through to a labeled "no prior available" state
+// rather than guessing.
+// ============================================================================
+interface IndustryPriors {
+  label: string;
+  grossMarginBandPct: [number, number];
+  loadedEngineerCostMonthlyUsd: [number, number]; // fully-loaded, i.e. salary + benefits + overhead
+  cacPaybackTargetMonths: number;
+  churnBenchmarkMonthlyPct: [number, number]; // [B2B target, B2C target] expressed as a range for simplicity
+}
+
+// TODO: VERIFY — these figures are general-knowledge estimates, not audited.
+const INDUSTRY_PRIORS: Record<'SAAS' | 'ECOMMERCE' | 'FINTECH', IndustryPriors> = {
+  SAAS: {
+    label: 'SaaS',
+    grossMarginBandPct: [70, 85],
+    loadedEngineerCostMonthlyUsd: [8000, 15000],
+    cacPaybackTargetMonths: 18,
+    churnBenchmarkMonthlyPct: [1, 5], // B2B ~1-2%, B2C up to ~5%
+  },
+  ECOMMERCE: {
+    label: 'E-commerce',
+    grossMarginBandPct: [30, 50],
+    loadedEngineerCostMonthlyUsd: [7000, 13000],
+    cacPaybackTargetMonths: 6,
+    churnBenchmarkMonthlyPct: [10, 30], // repeat-purchase churn runs much higher than SaaS
+  },
+  FINTECH: {
+    label: 'Fintech',
+    grossMarginBandPct: [40, 65],
+    loadedEngineerCostMonthlyUsd: [9000, 17000], // compliance/security skillset premium
+    cacPaybackTargetMonths: 12,
+    churnBenchmarkMonthlyPct: [2, 6],
+  },
+};
+
+// Normalizes free-text industry_taxonomy_id (e.g. "saas", "e-commerce",
+// "Fintech", "SAAS") into one of the three covered industries, or null if
+// it doesn't match — null means "no prior available," handled honestly in
+// the prompt rather than guessing a wrong industry's numbers.
+function normalizeIndustryForPriors(industryTaxonomyId: string | null | undefined): keyof typeof INDUSTRY_PRIORS | null {
+  if (!industryTaxonomyId) return null;
+  const normalized = industryTaxonomyId.toLowerCase().replace(/[\s_-]/g, '');
+
+  if (['saas', 'software', 'softwareasaservice'].some((k) => normalized.includes(k))) return 'SAAS';
+  if (['ecommerce', 'ecom', 'retail', 'dtc'].some((k) => normalized.includes(k))) return 'ECOMMERCE';
+  if (['fintech', 'finance', 'banking', 'payments'].some((k) => normalized.includes(k))) return 'FINTECH';
+
+  return null;
+}
+
+function formatIndustryPriorsBlock(industryTaxonomyId: string | null | undefined): string {
+  const key = normalizeIndustryForPriors(industryTaxonomyId);
+  if (!key) {
+    return `INDUSTRY PRIORS: No prior table available for "${industryTaxonomyId || 'unspecified'}". Do not guess benchmark numbers for this industry — reason qualitatively instead, and say plainly that no industry-specific benchmark is available rather than inventing one.`;
+  }
+
+  const p = INDUSTRY_PRIORS[key];
+  return `INDUSTRY PRIORS FOR ${p.label.toUpperCase()} (TODO: VERIFY — general estimates, not audited; use ONLY when the real ledger value is missing, and ALWAYS label as an assumption when used):
+  - Gross margin band: ${p.grossMarginBandPct[0]}-${p.grossMarginBandPct[1]}%
+  - Fully-loaded engineer cost: $${p.loadedEngineerCostMonthlyUsd[0].toLocaleString()}-$${p.loadedEngineerCostMonthlyUsd[1].toLocaleString()}/month
+  - CAC payback target: <${p.cacPaybackTargetMonths} months
+  - Monthly churn benchmark: ${p.churnBenchmarkMonthlyPct[0]}-${p.churnBenchmarkMonthlyPct[1]}%`;
 }
 
 // ============================================================================
@@ -165,9 +247,34 @@ Required in every field: one concrete claim, one number or named mechanism where
 A confidence score is provided to you below for this exact reason — when confidence is genuinely uncertain, STATE THE NUMBER, don't pad the prose to compensate. "62% confidence — CAC and COGS not yet synced" is a complete, sufficient hedge. A paragraph explaining why you're hedging is not.
 
 ═══════════════════════════════════════════════════════════════
+DO THE LITERAL MATH WHEN THE USER GIVES YOU NUMBERS
+═══════════════════════════════════════════════════════════════
+If the user's message contains concrete numbers (a headcount, a percentage, a dollar figure, a runway length), you are REQUIRED to multiply them through to a concrete answer — not just gesture at the mechanism in words. "Hiring increases burn" is insufficient when the user told you "3 engineers" and "8 months runway." The correct move: take the headcount, multiply by a per-unit cost (real ledger data if present, otherwise an industry prior — see ASSUMPTION-LABELING RULE below), and state the resulting new burn and new runway as a number or tight range. Example of the standard required: "3 engineers × $8-15k/month fully-loaded ≈ $24-45k/month added burn. Against 8 months runway, that compresses to roughly 5.5-6.8 months unless growth accelerates." Naming the mechanism without running the multiplication is an incomplete answer.
+
+═══════════════════════════════════════════════════════════════
+ASSUMPTION-LABELING RULE — WHEN YOU USE A PRIOR INSTEAD OF REAL DATA
+═══════════════════════════════════════════════════════════════
+An industry priors block is injected below, scoped to this user's industry where available. When real ledger data exists, ALWAYS use the real number and never substitute a prior over it. When real ledger data is missing and you use a prior instead (e.g. an assumed engineer cost, an assumed gross margin), you MUST do two things: (1) say so inline in the relevant field using language like "assuming ~$10k/month fully-loaded" or "using a SaaS gross margin assumption of ~75%", and (2) add a short string to the "assumptions_used" array naming exactly which prior was substituted (e.g. "engineer cost assumed at industry midpoint, not synced from ledger"). A confident-sounding number that silently used an assumed industry benchmark instead of this company's real data is exactly the kind of false certainty this system exists to avoid — labeling it is not optional. If no priors are available for this industry, say so plainly rather than inventing a number from a different industry's benchmarks. If nothing was assumed (all inputs were real), set assumptions_used to an empty array.
+
+═══════════════════════════════════════════════════════════════
+SHARPER PHRASING — THIS IS DECISION INTELLIGENCE, NOT GENERIC ADVICE
+═══════════════════════════════════════════════════════════════
+Avoid soft, generic phrasing that could appear in any business chatbot. Compare:
+WEAK: "Competitor price cuts can be a market signal."
+SHARP: "A 20% competitor price cut only matters if your buyers are price-sensitive and switching cost is low — if retention is already weak, matching price compresses margin without fixing the underlying leak."
+WEAK: "Could lead to significant revenue and margin erosion."
+SHARP: "Cutting price while churn stays unresolved triggers a double compression: lower ARPU plus unstable retention, which erodes LTV/CAC efficiency and accelerates runway decay."
+Always name the SPECIFIC mechanism connecting the two variables in play — never describe a risk in the abstract when you can name exactly which two numbers are colliding and why.
+
+═══════════════════════════════════════════════════════════════
 PERSONA VOICE (register only — never changes data honesty)
 ═══════════════════════════════════════════════════════════════
 {{PERSONA_VOICE_BLOCK}}
+
+═══════════════════════════════════════════════════════════════
+INDUSTRY PRIORS (use per the ASSUMPTION-LABELING RULE above)
+═══════════════════════════════════════════════════════════════
+{{INDUSTRY_PRIORS_BLOCK}}
 
 ═══════════════════════════════════════════════════════════════
 INTENT CLASSIFICATION & MANDATORY JSON OUTPUT SCHEMA
@@ -189,11 +296,12 @@ INTENT 2: "STRATEGIC_ADVICE"
   {
     "type": "STRATEGIC_ADVICE",
     "recall_opening": "1 short clause naturally referencing a relevant pending decision, or null if none applies.",
-    "action_directive": "One sharp imperative sentence. Not a suggestion — a command. If this IS the answer to a recall question, state the recalled fact/decision directly here instead.",
-    "strategic_framework": "MAX 2-3 sentences. Name the mechanism or framework and state its conclusion. No preamble.",
-    "analytical_baselines": "MAX 1-2 sentences. One hard benchmark with an exact figure or range. No explanation of why benchmarks matter.",
+    "action_directive": "One sharp imperative sentence. Not a suggestion — a command. If this IS the answer to a recall question, state the recalled fact/decision directly here instead. If the user gave concrete numbers, the math must be run through to a concrete figure here, not just named.",
+    "strategic_framework": "MAX 2-3 sentences. Name the SPECIFIC mechanism connecting the variables in play and state its conclusion. No preamble, no generic abstractions — see SHARPER PHRASING rule.",
+    "analytical_baselines": "MAX 1-2 sentences. One hard benchmark with an exact figure or range, drawn from real ledger data if present, otherwise from the injected industry priors (labeled per ASSUMPTION-LABELING RULE).",
     "algebraic_impact_model": null, "impact_runway": null, "impact_margin": null, "ledger_hydration_parameters": null,
-    "auditor_warning": "MAX 1-2 sentences, or null if no material risk. A genuine downside risk ONLY — never a compliance check or follow-up question."
+    "auditor_warning": "MAX 1-2 sentences, or null if no material risk. A genuine downside risk ONLY — never a compliance check or follow-up question. Name the specific colliding mechanism, not an abstract risk.",
+    "assumptions_used": ["array of strings naming any industry prior substituted for real data, empty array if none"]
   }
 
 INTENT 3: "FINANCIAL_MATRIX"
@@ -201,12 +309,13 @@ INTENT 3: "FINANCIAL_MATRIX"
   {
     "type": "FINANCIAL_MATRIX",
     "recall_opening": "1 short clause naturally referencing a relevant pending decision, or null if none applies.",
-    "action_directive": "One sharp imperative sentence. If a required input (burn rate, runway, etc.) is missing, name that gap as the reason for the directive, e.g. 'Can't size absorption — burn rate isn't synced. Directionally:' before the directive.",
-    "algebraic_impact_model": "MAX 2-3 sentences. State the formulaic relationship and its compounding effect directly — show the mechanism, not a lecture about it.",
-    "impact_runway": "MAX 1 sentence. Direction + magnitude, OR state plainly 'unavailable — burn rate not synced' if true. Never claim a number you don't have.",
-    "impact_margin": "MAX 1 sentence. Direction + magnitude.",
+    "action_directive": "One sharp imperative sentence. If a required input (burn rate, runway, etc.) is missing, name that gap as the reason for the directive, e.g. 'Can't size absorption — burn rate isn't synced. Directionally:' before the directive. If the user gave concrete numbers, run the literal multiplication through to a number here.",
+    "algebraic_impact_model": "MAX 2-3 sentences. State the formulaic relationship and its compounding effect directly, with the actual numbers multiplied through when the user supplied them — show the mechanism AND the magnitude, not a lecture about either.",
+    "impact_runway": "MAX 1 sentence. Direction + magnitude as a concrete number or tight range, OR state plainly 'unavailable — burn rate not synced' if true. Never claim a number you don't have grounds for.",
+    "impact_margin": "MAX 1 sentence. Direction + magnitude as a concrete number or tight range.",
     "ledger_hydration_parameters": ["array", "of", "snake_case", "ledger", "keys"],
-    "auditor_warning": "MAX 1-2 sentences, or null if no material risk. A genuine downside risk ONLY — never a compliance check or follow-up question."
+    "auditor_warning": "MAX 1-2 sentences, or null if no material risk. A genuine downside risk ONLY — never a compliance check or follow-up question. Name the specific colliding mechanism, not an abstract risk.",
+    "assumptions_used": ["array of strings naming any industry prior substituted for real data, empty array if none"]
   }
 
 INTENT 4: "HYDRATE_LEDGER"
@@ -290,6 +399,7 @@ function selfHealAndValidateOutput(parsed: any, confidenceData: ConfidenceData):
       strategic_framework: capSentences(String(parsed.strategic_framework || "First-principles structural review indicated."), 3),
       analytical_baselines: capSentences(String(parsed.analytical_baselines || "Venture-backed margin floors are typically defended at 60-70%."), 2),
       auditor_warning: parsed.auditor_warning ? capSentences(String(parsed.auditor_warning), 2) : null,
+      assumptions_used: Array.isArray(parsed.assumptions_used) ? parsed.assumptions_used.map(String) : [],
       confidence_score: confidenceData.score,
       confidence_grade: confidenceData.grade,
       confidence_reasons: confidenceData.reasons,
@@ -342,6 +452,7 @@ function selfHealAndValidateOutput(parsed: any, confidenceData: ConfidenceData):
     auditor_warning: parsed.auditor_warning
       ? capSentences(String(parsed.auditor_warning), 2)
       : "Unverified ledger state risks compounding cash flow anomalies undetected.",
+    assumptions_used: Array.isArray(parsed.assumptions_used) ? parsed.assumptions_used.map(String) : [],
     confidence_score: confidenceData.score,
     confidence_grade: confidenceData.grade,
     confidence_reasons: confidenceData.reasons,
@@ -502,7 +613,10 @@ export async function executeSimoraCoreEngine(
   `;
 
   const personaBlock = getPersonaVoiceBlock(user.user_persona);
-  const fullSystemPrompt = SIMORA_MASTER_SYSTEM_PROMPT.replace('{{PERSONA_VOICE_BLOCK}}', personaBlock);
+  const industryPriorsBlock = formatIndustryPriorsBlock(user.industry_taxonomy_id);
+  const fullSystemPrompt = SIMORA_MASTER_SYSTEM_PROMPT
+    .replace('{{PERSONA_VOICE_BLOCK}}', personaBlock)
+    .replace('{{INDUSTRY_PRIORS_BLOCK}}', industryPriorsBlock);
 
   // ── 4. INFERENCE LOOP ─────────────────────────────────────────────────────
   let completion;
@@ -555,6 +669,12 @@ Classify intent and output valid JSON following schema requirements. If this mes
   // ── 5. RUNTIME VALIDATION & SELF-HEALING FILTER ──────────────────────────
   const validatedOutput = selfHealAndValidateOutput(parsedRaw, confidenceData);
 
+  // Tracks the outcome of every Supabase write below. A response can reach
+  // the user looking perfect while every write here fails silently — this
+  // object, summarized in step 11, is what makes that visible in one log line
+  // instead of requiring a manual scroll through scattered WARNING lines.
+  const writeStatus: Record<string, { ok: boolean; error?: string; code?: string }> = {};
+
   // ── 6. STRATEGY CARD PERSISTENCE FOR FINANCIAL INTENTS ───────────────────
   if (validatedOutput.type === 'FINANCIAL_MATRIX') {
     const delta = ctx.incomingDelta || 0;
@@ -579,6 +699,7 @@ Classify intent and output valid JSON following schema requirements. If this mes
           variance_check: 'PASS',
           elasticity_matrix: systemIntegrityFlag,
           confidence_reasons: validatedOutput.confidence_reasons,
+          assumptions_used: validatedOutput.assumptions_used,
           timestamp: new Date().toISOString(),
         },
         is_active: true,
@@ -586,6 +707,9 @@ Classify intent and output valid JSON following schema requirements. If this mes
 
     if (insertError) {
       console.error(`PERSISTENCE_WARNING: Failed to commit Strategy Card: ${insertError.message}`);
+      writeStatus.strategy_cards = { ok: false, error: insertError.message, code: (insertError as any).code };
+    } else {
+      writeStatus.strategy_cards = { ok: true };
     }
   }
 
@@ -605,6 +729,9 @@ Classify intent and output valid JSON following schema requirements. If this mes
 
     if (upsertError) {
       console.error(`DATABASE_WRITE_WARNING: Failed to execute manual ledger hydration: ${upsertError.message}`);
+      writeStatus.ledger_metrics = { ok: false, error: upsertError.message, code: (upsertError as any).code };
+    } else {
+      writeStatus.ledger_metrics = { ok: true };
     }
   }
 
@@ -622,6 +749,9 @@ Classify intent and output valid JSON following schema requirements. If this mes
 
   if (memoryInsertError) {
     console.error(`MEMORY_LOGGING_WARNING: Failed to log vector states: ${memoryInsertError.message}`);
+    writeStatus.ledger_embeddings = { ok: false, error: memoryInsertError.message, code: (memoryInsertError as any).code };
+  } else {
+    writeStatus.ledger_embeddings = { ok: true };
   }
 
   // ── 10. DECISION LOGGER ───────────────────────────────────────────────────
@@ -637,9 +767,28 @@ Classify intent and output valid JSON following schema requirements. If this mes
 
     if (decisionLogError) {
       console.error(`DECISION_LOG_WARNING: Failed to persist decision log: ${decisionLogError.message}`);
+      writeStatus.decision_logs = { ok: false, error: decisionLogError.message, code: (decisionLogError as any).code };
+    } else {
+      writeStatus.decision_logs = { ok: true };
     }
   }
 
-  // ── 11. RETURN ─────────────────────────────────────────────────────────
+  // ── 11. AGGREGATED WRITE-STATUS SUMMARY ──────────────────────────────────
+  // This is the single line to grep for in Railway logs: it tells you in
+  // one glance which Supabase writes succeeded vs failed for this turn,
+  // instead of needing to scroll past scattered WARNING lines from steps
+  // 6-10 above. A response can look perfect in chat while every write here
+  // fails silently underneath it — this line is what makes that visible.
+  const failedWrites = Object.entries(writeStatus).filter(([, v]) => v.ok === false);
+  if (failedWrites.length > 0) {
+    console.error(
+      `[SIMORA WRITE-STATUS] ❌ ${failedWrites.length} write(s) failed for user ${user.id}:`,
+      JSON.stringify(writeStatus),
+    );
+  } else {
+    console.log(`[SIMORA WRITE-STATUS] ✅ All writes succeeded for user ${user.id}:`, JSON.stringify(writeStatus));
+  }
+
+  // ── 12. RETURN ─────────────────────────────────────────────────────────
   return validatedOutput;
 }
