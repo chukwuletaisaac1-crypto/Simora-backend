@@ -213,6 +213,99 @@ const META_API_TOKEN = process.env.META_API_TOKEN as string;
 const META_PHONE_ID  = process.env.META_PHONE_ID  as string;
 
 // ============================================================================
+// PHONE NUMBER ENCRYPTION (PHASE 5: OUTCOME TRACKING — ACTIVE NUDGE SUPPORT)
+//
+// whatsapp_id_hash (SHA-256) is one-way by design and cannot be reversed —
+// that's correct for identity lookup, but it means SIMORA has no way to
+// proactively message a user it hasn't heard from recently. The active
+// decision-followup nudge needs a real, retrievable phone number. Per
+// explicit decision: store it encrypted (reversible, AES-256-GCM), not in
+// plaintext and not hashed. This is genuinely different from the identity
+// hash — this column exists ONLY so the server itself can decrypt and use
+// the number to send a message; it is never used for lookup/matching.
+//
+// REQUIRES a new Railway env var: WHATSAPP_NUMBER_ENCRYPTION_KEY — a 32-byte
+// key, base64-encoded. Generate one with:
+//   node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
+// Store the output as the env var value. Losing this key makes every
+// encrypted number permanently unrecoverable — back it up somewhere safe
+// outside Railway (e.g. a password manager), not just in the dashboard.
+// ============================================================================
+const ENCRYPTION_KEY_B64 = process.env.WHATSAPP_NUMBER_ENCRYPTION_KEY;
+let ENCRYPTION_KEY: Buffer | null = null;
+
+if (!ENCRYPTION_KEY_B64) {
+  console.error(
+    '❌ WHATSAPP_NUMBER_ENCRYPTION_KEY is not set. Active decision-followup nudges will be ' +
+    'unable to encrypt/decrypt phone numbers until this is configured. The rest of the ' +
+    'system (onboarding, passive resolution, all reactive WhatsApp replies) is unaffected — ' +
+    'this only blocks proactive outreach.',
+  );
+} else {
+  try {
+    const keyBuffer = Buffer.from(ENCRYPTION_KEY_B64, 'base64');
+    if (keyBuffer.length !== 32) {
+      throw new Error(`Key must decode to exactly 32 bytes, got ${keyBuffer.length}.`);
+    }
+    ENCRYPTION_KEY = keyBuffer;
+    console.log('[ENCRYPTION] ✅ WhatsApp number encryption key loaded.');
+  } catch (err: any) {
+    console.error('❌ WHATSAPP_NUMBER_ENCRYPTION_KEY is set but invalid:', err.message);
+  }
+}
+
+/**
+ * Encrypts a phone number using AES-256-GCM (authenticated encryption —
+ * not just reversible obfuscation; tampering with the ciphertext is
+ * detectable on decrypt, unlike plain AES-CBC). Output format is a single
+ * string: `iv:authTag:ciphertext`, all hex-encoded, so it fits in one TEXT
+ * column without needing a JSON or composite type.
+ */
+function encryptPhoneNumber(plaintext: string): string | null {
+  if (!ENCRYPTION_KEY) {
+    console.error('[ENCRYPTION] ❌ Cannot encrypt — encryption key not loaded.');
+    return null;
+  }
+  try {
+    const iv = crypto.randomBytes(12); // 12 bytes is the recommended IV length for GCM
+    const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+    const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
+    const authTag = cipher.getAuthTag();
+    return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
+  } catch (err: any) {
+    console.error('[ENCRYPTION] ❌ Encryption failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Decrypts a value produced by encryptPhoneNumber(). Returns null on any
+ * failure (wrong key, tampered ciphertext, malformed format) rather than
+ * throwing — callers (the nudge job) treat null the same as "no number on
+ * file" and skip that user, rather than crashing the whole batch job over
+ * one bad row.
+ */
+function decryptPhoneNumber(encryptedValue: string): string | null {
+  if (!ENCRYPTION_KEY) {
+    console.error('[ENCRYPTION] ❌ Cannot decrypt — encryption key not loaded.');
+    return null;
+  }
+  try {
+    const [ivHex, authTagHex, ciphertextHex] = encryptedValue.split(':');
+    if (!ivHex || !authTagHex || !ciphertextHex) {
+      throw new Error('Malformed encrypted value — expected iv:authTag:ciphertext format.');
+    }
+    const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, Buffer.from(ivHex, 'hex'));
+    decipher.setAuthTag(Buffer.from(authTagHex, 'hex'));
+    const decrypted = Buffer.concat([decipher.update(Buffer.from(ciphertextHex, 'hex')), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch (err: any) {
+    console.error('[ENCRYPTION] ❌ Decryption failed (key mismatch, tampering, or malformed value):', err.message);
+    return null;
+  }
+}
+
+// ============================================================================
 // REDIS — URL-first, Railway-aware, never falls back to localhost in production
 // ============================================================================
 if (!process.env.REDIS_URL && !process.env.REDISHOST) {
@@ -242,6 +335,12 @@ console.log('[REDIS] Strategy:', process.env.REDIS_URL ? '✅ URL mode (Railway)
 // ============================================================================
 const whatsappQueue  = new Queue('WhatsAppStateTransition', { connection: REDIS_CONNECTION });
 const hydrationQueue = new Queue('DataHydrationIngestion',  { connection: REDIS_CONNECTION });
+// PHASE 5 — OUTCOME TRACKING: repeatable job that scans for stale PENDING
+// decisions and sends an active WhatsApp check-in. See SUPABASE_SCHEMA_NOTE_
+// outcome_tracking.md for the full design. This queue has no incoming
+// webhook trigger — it's scheduled below via queue.add() with a `repeat`
+// option, BullMQ's native cron-like mechanism.
+const decisionFollowupQueue = new Queue('DecisionFollowupNudge', { connection: REDIS_CONNECTION });
 
 // ============================================================================
 // EXPRESS APP
@@ -358,7 +457,7 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
 // ============================================================================
 app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
   try {
-    const { userId, whatsappHash, incomingText, incomingDelta } = req.body;
+    const { userId, whatsappHash, incomingText, incomingDelta, canBeNudged } = req.body;
 
     if (!userId || !whatsappHash || !incomingText) {
       res.status(400).json({ error: 'Missing required fields: userId, whatsappHash, incomingText' });
@@ -373,6 +472,9 @@ app.post('/api/v1/test-engine', async (req: Request, res: Response) => {
         whatsappHash,
         incomingText,
         incomingDelta: Number(incomingDelta || 0),
+        // Optional in test payloads — if omitted, the engine treats it as
+        // UNKNOWN and answers conservatively if asked about followups.
+        canBeNudged: typeof canBeNudged === 'boolean' ? canBeNudged : undefined,
       },
       supabaseAdmin,
       openai,
@@ -510,12 +612,28 @@ const whatsappWorker = new Worker(
 
     // ── NEW USER ─────────────────────────────────────────────────────────
     if (!user) {
+      // Encrypt the real number for later proactive outreach (decision
+      // nudges). whatsapp_id_hash remains the one-way identity lookup key —
+      // this encrypted value is a SEPARATE column, used only so the server
+      // itself can decrypt and message this user later without the user
+      // having messaged first. encryptPhoneNumber() returns null if the
+      // encryption key isn't configured — that's handled gracefully below
+      // rather than blocking user creation on it.
+      const encryptedNumber = encryptPhoneNumber(from);
+      if (!encryptedNumber) {
+        console.warn(
+          `[WORKER] ⚠️ Could not encrypt WhatsApp number for new user (hash: ${whatsappHash}). ` +
+          `Active decision-followup nudges will not work for this user until WHATSAPP_NUMBER_ENCRYPTION_KEY is configured.`,
+        );
+      }
+
       const { data: newUser, error: insertErr } = await supabaseAdmin
         .from('users')
         .insert([{
-          whatsapp_id_hash:      whatsappHash,
-          current_routing_state: 'AWAITING_LOCATION',
-          created_at:            new Date().toISOString(),
+          whatsapp_id_hash:        whatsappHash,
+          whatsapp_number_encrypted: encryptedNumber,
+          current_routing_state:  'AWAITING_LOCATION',
+          created_at:              new Date().toISOString(),
         }])
         .select()
         .single();
@@ -541,6 +659,55 @@ const whatsappWorker = new Worker(
     }
 
     console.log(`[WORKER] User ${user.id} | state: ${user.current_routing_state}`);
+
+    // ── BACKFILL: whatsapp_number_encrypted (PHASE 5 SELF-HEALING) ─────────
+    // This runs on EVERY message from an existing user, not just new-user
+    // creation. It closes the gap flagged in the schema note: users created
+    // before the encryption rollout have whatsapp_number_encrypted = NULL,
+    // and the only place the real number is ever available is `from` on an
+    // incoming webhook — there is no other way to recover it later. Rather
+    // than leaving that as a manual follow-up, every message from a user
+    // missing this field now triggers an attempt to backfill it. This makes
+    // the encryption gap self-healing under normal usage: any user who is
+    // active enough to send a message will get nudging capability restored
+    // the moment the encryption key is correctly configured.
+    //
+    // Every outcome here is logged explicitly and distinctly — encrypted
+    // successfully, key missing, or write failed — so encryption status is
+    // never a silent unknown. This is the visibility requirement: SIMORA
+    // (via these logs, and the new column read below) always knows whether
+    // a given user CAN be nudged, instead of that fact only surfacing as a
+    // failure inside the nudge job days later.
+    if (!user.whatsapp_number_encrypted) {
+      const backfillEncrypted = encryptPhoneNumber(from);
+
+      if (!backfillEncrypted) {
+        // encryptPhoneNumber() already logs the specific reason (missing
+        // or invalid WHATSAPP_NUMBER_ENCRYPTION_KEY) — no need to repeat it
+        // here, but we log the user-level consequence explicitly so it's
+        // traceable to a specific user_id, not just a generic key warning.
+        console.warn(
+          `[BACKFILL] ⚠️ User ${user.id} still has no encrypted WhatsApp number on file — ` +
+          `encryption key unavailable or invalid. This user CANNOT be actively nudged until resolved. ` +
+          `No action needed here; this will retry automatically on their next message.`,
+        );
+      } else {
+        const { error: backfillErr } = await supabaseAdmin
+          .from('users')
+          .update({ whatsapp_number_encrypted: backfillEncrypted, updated_at: new Date().toISOString() })
+          .eq('id', user.id);
+
+        if (backfillErr) {
+          console.error(
+            `[BACKFILL] ❌ Encrypted number was generated for user ${user.id} but the Supabase write failed: ` +
+            `${backfillErr.message}. This user CANNOT be actively nudged until this write succeeds — will retry on next message.`,
+          );
+        } else {
+          console.log(`[BACKFILL] ✅ Encrypted WhatsApp number backfilled for user ${user.id} — active nudging now possible.`);
+          user.whatsapp_number_encrypted = backfillEncrypted; // keep in-memory user object consistent for the rest of this job
+        }
+      }
+    }
 
     switch (user.current_routing_state) {
 
@@ -765,12 +932,23 @@ const whatsappWorker = new Worker(
         try {
           const incomingDelta = parseIncomingDelta(text);
 
+          // canBeNudged is computed HERE, in server.ts, where both facts
+          // needed to determine it actually live: whether this user has an
+          // encrypted number on file (set at insert time or by the backfill
+          // step above), AND whether the encryption key is currently valid
+          // server-wide (ENCRYPTION_KEY, set once at boot from the env var).
+          // A user can have a stored encrypted value yet still be
+          // un-nudgeable right now if the key was rotated/removed — both
+          // conditions must hold for nudging to actually work.
+          const canBeNudged = Boolean(user.whatsapp_number_encrypted) && ENCRYPTION_KEY !== null;
+
           const result = await executeSimoraCoreEngine(
             {
               userId:        user.id,
               whatsappHash,
               incomingText:  text,
               incomingDelta,
+              canBeNudged,
             },
             supabaseAdmin,
             openai,
@@ -861,12 +1039,159 @@ const hydrationWorker = new Worker(
   { connection: REDIS_CONNECTION },
 );
 
-// ── Worker error listeners (prevent Redis errors from crashing main process)
-whatsappWorker.on('error',   (err) => console.error('[WHATSAPP WORKER ERROR]:', err.message));
-hydrationWorker.on('error',  (err) => console.error('[HYDRATION WORKER ERROR]:', err.message));
+// ============================================================================
+// WORKER — Decision Followup Nudge (PHASE 5: OUTCOME TRACKING)
+//
+// Runs once a day (scheduled below via decisionFollowupQueue.add with a
+// `repeat` option). Each run: find every decision_logs row that is still
+// PENDING, was created more than 3 days ago, and either has never been
+// nudged (last_followup_sent_at is null) or was last nudged more than 3
+// days ago. Send one WhatsApp check-in per qualifying decision, then stamp
+// last_followup_sent_at so the next daily run doesn't re-send it within the
+// same 3-day window. This nudge does NOT resolve the decision itself — the
+// user's reply is picked up by detectDecisionResolution() in the engine on
+// their next message, the same passive path used for opportunistic replies.
+// ============================================================================
+const decisionFollowupWorker = new Worker(
+  'DecisionFollowupNudge',
+  async () => {
+    console.log('[DECISION FOLLOWUP] Scanning for stale pending decisions...');
 
-whatsappWorker.on('failed',  (job, err) => console.error(`[WHATSAPP WORKER] Job ${job?.id} failed:`, err.message));
-hydrationWorker.on('failed', (job, err) => console.error(`[HYDRATION WORKER] Job ${job?.id} failed:`, err.message));
+    const threeDaysAgoIso = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
+
+    // Stale PENDING decisions: created more than 3 days ago.
+    const { data: staleDecisions, error: fetchErr } = await supabaseAdmin
+      .from('decision_logs')
+      .select('*, users!inner(whatsapp_number_encrypted)')
+      .eq('decision_status', 'PENDING')
+      .lt('created_at', threeDaysAgoIso);
+
+    if (fetchErr) {
+      console.error('[DECISION FOLLOWUP] ❌ Fetch failed:', fetchErr.message);
+      throw new Error(`Decision followup fetch failed: ${fetchErr.message}`);
+    }
+
+    if (!staleDecisions || staleDecisions.length === 0) {
+      console.log('[DECISION FOLLOWUP] No stale pending decisions found.');
+      return;
+    }
+
+    // Filter in code (not in the query) for the "never nudged OR nudged
+    // more than 3 days ago" condition — combining a null-check with a date
+    // comparison is awkward to express cleanly in a single Supabase filter
+    // chain, and this list is expected to be small enough that filtering
+    // in memory here is simpler and just as correct.
+    const dueForNudge = staleDecisions.filter((d: any) => {
+      if (!d.last_followup_sent_at) return true;
+      return new Date(d.last_followup_sent_at).getTime() < Date.now() - 3 * 24 * 60 * 60 * 1000;
+    });
+
+    console.log(`[DECISION FOLLOWUP] ${dueForNudge.length} decision(s) due for a nudge.`);
+
+    // Aggregate run-level counters — this is the visibility piece. A single
+    // skipped decision is a minor, expected event (e.g. one stale user).
+    // ALL decisions skipping for the SAME reason (key missing/invalid) is a
+    // systemic failure that needs to be obvious at a glance, not discovered
+    // by manually counting individual warning lines across a long log.
+    let nudgeSent = 0;
+    let nudgeSkippedNoNumber = 0;
+    let nudgeFailedToSend = 0;
+
+    for (const decision of dueForNudge) {
+      // Decrypt the stored phone number using the AES-256-GCM helper above.
+      // decryptPhoneNumber() returns null if the key is missing, the value
+      // is malformed, or decryption otherwise fails — any of those cases
+      // are treated identically to "no number on file" and this decision
+      // is skipped for this run rather than crashing the whole batch.
+      const encryptedNumber = (decision as any).users?.whatsapp_number_encrypted;
+      const whatsappNumber = encryptedNumber ? decryptPhoneNumber(encryptedNumber) : null;
+
+      if (!whatsappNumber) {
+        console.error(
+          `[DECISION FOLLOWUP] ⚠️ Cannot nudge decision ${decision.id} — no decryptable WhatsApp number on file. ` +
+          `Either this user predates the encryption rollout and hasn't messaged since (no backfill chance yet), ` +
+          `or WHATSAPP_NUMBER_ENCRYPTION_KEY is misconfigured.`,
+        );
+        nudgeSkippedNoNumber++;
+        continue;
+      }
+
+      try {
+        await sendWhatsApp(whatsappNumber, {
+          type: 'text',
+          text: {
+            body:
+              `💭 Following up — a few days ago you asked: "${decision.user_question}"\n\n` +
+              `SIMORA's directive at the time: "${decision.simora_recommendation}"\n\n` +
+              `Did that hold, or did things go differently?`,
+          },
+        });
+      } catch (sendErr: any) {
+        console.error(`[DECISION FOLLOWUP] ❌ sendWhatsApp threw for decision ${decision.id}:`, sendErr?.message || sendErr);
+        nudgeFailedToSend++;
+        continue;
+      }
+
+      const { error: stampErr } = await supabaseAdmin
+        .from('decision_logs')
+        .update({ last_followup_sent_at: new Date().toISOString() })
+        .eq('id', decision.id);
+
+      if (stampErr) {
+        console.error(`[DECISION FOLLOWUP] ⚠️ Failed to stamp last_followup_sent_at for ${decision.id}:`, stampErr.message);
+        nudgeFailedToSend++;
+      } else {
+        console.log(`[DECISION FOLLOWUP] ✅ Nudge sent for decision ${decision.id}`);
+        nudgeSent++;
+      }
+    }
+
+    // ── RUN SUMMARY — single line, grep-able, makes systemic failure obvious ─
+    // If nudgeSkippedNoNumber equals dueForNudge.length (everyone skipped for
+    // the same reason), that's a strong signal of a misconfigured or missing
+    // WHATSAPP_NUMBER_ENCRYPTION_KEY, not a series of unrelated one-off gaps.
+    const allSkippedForSameReason = dueForNudge.length > 0 && nudgeSkippedNoNumber === dueForNudge.length;
+
+    if (allSkippedForSameReason) {
+      console.error(
+        `[DECISION FOLLOWUP RUN SUMMARY] 🚨 SYSTEMIC FAILURE: all ${dueForNudge.length} due decision(s) were ` +
+        `skipped for "no decryptable number" in this run. This strongly suggests WHATSAPP_NUMBER_ENCRYPTION_KEY ` +
+        `is missing or was rotated without re-encrypting existing data. Active nudging is effectively non-functional ` +
+        `right now — check the env var immediately.`,
+      );
+    } else {
+      console.log(
+        `[DECISION FOLLOWUP RUN SUMMARY] sent=${nudgeSent} skipped_no_number=${nudgeSkippedNoNumber} ` +
+        `failed_to_send=${nudgeFailedToSend} total_due=${dueForNudge.length}`,
+      );
+    }
+  },
+  { connection: REDIS_CONNECTION },
+);
+
+// ── Worker error listeners (prevent Redis errors from crashing main process)
+whatsappWorker.on('error',          (err) => console.error('[WHATSAPP WORKER ERROR]:', err.message));
+hydrationWorker.on('error',         (err) => console.error('[HYDRATION WORKER ERROR]:', err.message));
+decisionFollowupWorker.on('error',  (err) => console.error('[DECISION FOLLOWUP WORKER ERROR]:', err.message));
+
+whatsappWorker.on('failed',         (job, err) => console.error(`[WHATSAPP WORKER] Job ${job?.id} failed:`, err.message));
+hydrationWorker.on('failed',        (job, err) => console.error(`[HYDRATION WORKER] Job ${job?.id} failed:`, err.message));
+decisionFollowupWorker.on('failed', (job, err) => console.error(`[DECISION FOLLOWUP WORKER] Job ${job?.id} failed:`, err.message));
+
+// ── Schedule the repeatable nudge job — runs once every 24 hours. BullMQ's
+// native `repeat` option handles this without needing a separate cron
+// library. This call is safe to run on every server boot: BullMQ
+// deduplicates repeatable jobs with identical repeat options, so redeploys
+// won't stack up duplicate schedules.
+decisionFollowupQueue.add(
+  'ScanForStaleDecisions',
+  {},
+  { repeat: { every: 24 * 60 * 60 * 1000 } }, // 24 hours, in milliseconds
+).then(() => {
+  console.log('[DECISION FOLLOWUP] ✅ Repeatable daily scan scheduled.');
+}).catch((err) => {
+  console.error('[DECISION FOLLOWUP] ❌ Failed to schedule repeatable scan:', err.message);
+});
 
 // ============================================================================
 // SERVER BOOT
