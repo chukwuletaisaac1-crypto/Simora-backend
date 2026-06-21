@@ -52,6 +52,12 @@ interface IngestionContext {
   whatsappHash: string;
   incomingText: string;
   incomingDelta?: number;
+  // Set by server.ts based on whether users.whatsapp_number_encrypted exists
+  // and the encryption key is currently valid. Deliberately a plain boolean —
+  // the engine has no business knowing HOW nudging works (AES-256-GCM, key
+  // rotation, etc.), only WHETHER it currently can happen for this user.
+  // This keeps the encryption mechanism fully isolated to server.ts.
+  canBeNudged?: boolean;
 }
 
 interface ConfidenceData {
@@ -559,6 +565,76 @@ async function getPendingDecisionFollowup(userId: string, supabaseAdmin: Supabas
 }
 
 // ============================================================================
+// PASSIVE OUTCOME RESOLUTION DETECTOR
+// PHASE 5: OUTCOME TRACKING — CLOSING THE DECISION LOOP
+//
+// Design choice: this runs as its OWN small, focused LLM call rather than
+// becoming a 7th simultaneous job inside the main engine prompt. The main
+// prompt already asks one model call to do scope-gating, recall, persona
+// voice, density control, math, and confidence honesty — adding "also
+// detect if this message is secretly answering a 3-day-old decision" would
+// be a 7th concern competing for attention in the same pass. Splitting it
+// out makes each call's job small and verifiable on its own, and this call
+// is cheap (low token count, simple binary + short text output).
+//
+// This only fires when a pendingDecision actually exists — there is nothing
+// to resolve otherwise, so no wasted calls for users with a clean slate.
+// ============================================================================
+interface OutcomeResolution {
+  isResolving: boolean;
+  outcomeNotes: string | null;
+}
+
+async function detectDecisionResolution(
+  incomingText: string,
+  pendingDecision: any,
+  openai: OpenAI,
+): Promise<OutcomeResolution> {
+  if (!pendingDecision) {
+    return { isResolving: false, outcomeNotes: null };
+  }
+
+  try {
+    const completion = await openai.chat.completions.create({
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0,
+      response_format: { type: 'json_object' },
+      messages: [
+        {
+          role: 'system',
+          content: `You have ONE job: determine if the user's new message is reporting back on a specific prior decision, or if it's an unrelated new message.
+
+PRIOR DECISION ASKED: "${pendingDecision.user_question}"
+PRIOR RECOMMENDATION GIVEN: "${pendingDecision.simora_recommendation}"
+
+The user is REPORTING BACK if their new message describes what actually happened as a result of that decision — e.g. "yes it worked," "we didn't end up doing that," "churn actually went up after," "we reversed the price cut." 
+
+The user is NOT reporting back if their new message is simply related in topic but doesn't describe an outcome — e.g. bringing up a new, different pricing question, or asking something else about the same general area without saying what happened with the prior one.
+
+Return JSON only: { "isResolving": true or false, "outcomeNotes": "a short 1-sentence summary of what they reported, in their words/meaning, or null if isResolving is false" }`,
+        },
+        { role: 'user', content: incomingText },
+      ],
+    });
+
+    const raw = completion.choices?.[0]?.message?.content;
+    if (!raw) return { isResolving: false, outcomeNotes: null };
+
+    const parsed = JSON.parse(raw.trim().replace(/^```json\s*/i, '').replace(/```$/, '').trim());
+    return {
+      isResolving: Boolean(parsed.isResolving),
+      outcomeNotes: parsed.isResolving && parsed.outcomeNotes ? String(parsed.outcomeNotes).trim() : null,
+    };
+  } catch (err: any) {
+    // Non-fatal by design — if this detector fails, the main engine flow
+    // continues completely normally. The decision just stays PENDING, which
+    // is the safe default (no false resolution gets written).
+    console.error('[OUTCOME RESOLUTION] ⚠️ Detector call failed (non-fatal):', err?.message || err);
+    return { isResolving: false, outcomeNotes: null };
+  }
+}
+
+// ============================================================================
 // MAIN ENGINE
 // ============================================================================
 export async function executeSimoraCoreEngine(
@@ -579,6 +655,35 @@ export async function executeSimoraCoreEngine(
   }
 
   const pendingDecision = await getPendingDecisionFollowup(user.id, supabaseAdmin);
+
+  // ── OUTCOME RESOLUTION CHECK — does this message report back on the
+  // pending decision? If so, resolve it in decision_logs BEFORE proceeding
+  // with the rest of the engine. This runs regardless of what the main
+  // engine ultimately classifies this message as (CASUAL_CHAT, etc.) —
+  // a user reporting "yes, the price freeze held" might just be a short
+  // confirmation that itself resolves to CASUAL_CHAT downstream, but the
+  // outcome still needs to be captured.
+  let decisionWasResolvedThisTurn = false;
+  if (pendingDecision) {
+    const resolution = await detectDecisionResolution(ctx.incomingText, pendingDecision, openai);
+    if (resolution.isResolving) {
+      const { error: resolveErr } = await supabaseAdmin
+        .from('decision_logs')
+        .update({
+          decision_status: 'RESOLVED',
+          outcome_notes: resolution.outcomeNotes,
+          resolved_at: new Date().toISOString(),
+        })
+        .eq('id', pendingDecision.id);
+
+      if (resolveErr) {
+        console.error(`[OUTCOME RESOLUTION] ⚠️ Failed to write resolution for decision ${pendingDecision.id}:`, resolveErr.message);
+      } else {
+        console.log(`[OUTCOME RESOLUTION] ✅ Decision ${pendingDecision.id} resolved: "${resolution.outcomeNotes}"`);
+        decisionWasResolvedThisTurn = true;
+      }
+    }
+  }
 
   const { data: state, error: stateErr } = await supabaseAdmin
     .from('system_states')
@@ -627,7 +732,15 @@ export async function executeSimoraCoreEngine(
   }
 
   let decisionFollowupContext = '';
-  if (pendingDecision) {
+  if (decisionWasResolvedThisTurn) {
+    // The decision was just resolved by the dedicated detector above — the
+    // user's message WAS the outcome report. Acknowledge it briefly and
+    // naturally rather than treating it as still pending or ignoring it.
+    decisionFollowupContext = `
+    DECISION JUST RESOLVED THIS TURN:
+    The user's current message is reporting the outcome of a prior decision (Previous Question: "${pendingDecision.user_question}"). That outcome has already been recorded. If appropriate, briefly and naturally acknowledge what they reported (e.g. "Good to know that held" or "Noted — that didn't pan out, worth revisiting why") as part of your response, but do not treat this as a new pending decision needing recall_opening.
+    `;
+  } else if (pendingDecision) {
     decisionFollowupContext = `
     PENDING_DECISION_REVIEW (use for recall_opening if relevant, NEVER inside auditor_warning):
     Previous Question: ${pendingDecision.user_question}
@@ -661,6 +774,11 @@ export async function executeSimoraCoreEngine(
     Confidence Score: ${confidenceData.score}
     Confidence Grade: ${confidenceData.grade}
     Confidence Weaknesses: ${confidenceData.reasons.join(', ') || 'None'}
+
+    PROACTIVE FOLLOWUP CAPABILITY (only relevant if the user asks something like
+    "will you check in on this later" or "will you remind me about this"):
+    Can this user currently receive a proactive WhatsApp check-in: ${ctx.canBeNudged === false ? 'NO — not yet enabled for this user' : ctx.canBeNudged === true ? 'YES' : 'UNKNOWN — treat as not yet confirmed'}.
+    If asked directly whether you'll follow up later, answer honestly based on this value. If NO or UNKNOWN: say plainly that proactive check-ins aren't active yet for them specifically, but that you'll still recall this conversation the next time they message you. Do not claim a capability that isn't actually confirmed.
   `;
 
   const personaBlock = getPersonaVoiceBlock(user.user_persona);
