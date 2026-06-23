@@ -212,6 +212,31 @@ function parseIncomingDelta(text: string): number {
 const META_API_TOKEN = process.env.META_API_TOKEN as string;
 const META_PHONE_ID  = process.env.META_PHONE_ID  as string;
 
+// PHASE 6 — REAL LEDGER SYNC (Unified.to)
+// CORRECTED DESIGN: there is no separate static "connect" page. Unified.to
+// redirects the user's browser directly back to OUR server's own
+// GET /api/v1/unified/callback route after authorization — SIMORA_PUBLIC_URL
+// is this server's own public Railway domain, used only to build that
+// redirect target when generating the auth URL (see executeSimoraCoreEngine.ts,
+// step 8 of the CONNECT_LEDGER handling).
+const UNIFIED_API_KEY      = process.env.UNIFIED_API_KEY as string;
+const UNIFIED_WORKSPACE_ID = process.env.UNIFIED_WORKSPACE_ID as string;
+const SIMORA_PUBLIC_URL    = process.env.SIMORA_PUBLIC_URL as string;
+
+if (!UNIFIED_API_KEY || !UNIFIED_WORKSPACE_ID) {
+  console.warn(
+    '⚠️ UNIFIED_API_KEY or UNIFIED_WORKSPACE_ID not set. Ledger sync (CONNECT_LEDGER) will ' +
+    'be unable to generate working connection links or sync real financial data until configured. ' +
+    'The rest of SIMORA is unaffected.',
+  );
+}
+if (!SIMORA_PUBLIC_URL) {
+  console.warn(
+    '⚠️ SIMORA_PUBLIC_URL not set. CONNECT_LEDGER will be unable to build a working auth URL ' +
+    'until this is set to this server\'s own public Railway domain (e.g. https://your-app.up.railway.app).',
+  );
+}
+
 // ============================================================================
 // PHONE NUMBER ENCRYPTION (PHASE 5: OUTCOME TRACKING — ACTIVE NUDGE SUPPORT)
 //
@@ -450,6 +475,93 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
     console.error('[HYDRATION WEBHOOK] Queue error:', error);
     res.status(500).send('Internal Queue Error');
   }
+});
+
+// ============================================================================
+// UNIFIED.TO OAUTH CALLBACK — receives connection_id after the user
+// authorizes directly with Unified.to's own hosted authorization screen.
+//
+// Flow: SIMORA sends a WhatsApp link (built in executeSimoraCoreEngine.ts's
+// CONNECT_LEDGER handling) → user opens it in their phone's browser →
+// Unified.to shows ITS OWN hosted auth screen (no page of ours involved) →
+// on success, Unified.to redirects the browser HERE, with the
+// connection_id, plus the user_id and provider we embedded in the
+// success_redirect URL ourselves. This is what lets us know WHICH SIMORA
+// user a given connection_id belongs to — Unified.to has no concept of
+// "your app's user," only the connection_id it issues. There is no
+// `unified-auth.html` or any other static page in this flow — that was an
+// earlier draft design, since superseded by this simpler direct-redirect
+// approach (see SUPABASE_SCHEMA_NOTE_unified_ledger_sync.md).
+// ============================================================================
+app.get('/api/v1/unified/callback', async (req: Request, res: Response) => {
+  const connectionId = req.query.id as string | undefined; // Unified.to appends this
+  const userId        = req.query.uid as string | undefined;
+  const provider       = (req.query.provider as string | undefined)?.toLowerCase();
+
+  console.log('[UNIFIED CALLBACK] Received:', JSON.stringify({ connectionId, userId, provider }));
+
+  if (!connectionId || !userId || !provider) {
+    console.error('[UNIFIED CALLBACK] ❌ Missing required query params.');
+    res.status(400).send(
+      '<html><body style="font-family:monospace;background:#0B0D10;color:#E25A5A;padding:40px;">' +
+      'Connection failed — missing required information. Please try the link from WhatsApp again.' +
+      '</body></html>',
+    );
+    return;
+  }
+
+  const { error: upsertErr } = await supabaseAdmin
+    .from('unified_connections')
+    .upsert(
+      {
+        user_id:       userId,
+        provider:      provider,
+        connection_id: connectionId,
+        connected_at:  new Date().toISOString(),
+        is_active:     true,
+      },
+      { onConflict: 'user_id,provider' }, // one active connection per provider per user
+    );
+
+  if (upsertErr) {
+    console.error('[UNIFIED CALLBACK] ❌ Failed to store connection:', upsertErr.message);
+    res.status(500).send(
+      '<html><body style="font-family:monospace;background:#0B0D10;color:#E25A5A;padding:40px;">' +
+      'Connection succeeded on the provider side, but we could not save it. Please contact support.' +
+      '</body></html>',
+    );
+    return;
+  }
+
+  console.log(`[UNIFIED CALLBACK] ✅ Connection stored — user: ${userId} | provider: ${provider} | connection_id: ${connectionId}`);
+
+  // Notify the user on WhatsApp immediately — they authorized in a browser,
+  // but the confirmation should land where they actually live: the chat.
+  const { data: userRow } = await supabaseAdmin
+    .from('users')
+    .select('whatsapp_number_encrypted')
+    .eq('id', userId)
+    .single();
+
+  if (userRow?.whatsapp_number_encrypted) {
+    const decrypted = decryptPhoneNumber(userRow.whatsapp_number_encrypted);
+    if (decrypted) {
+      await sendWhatsApp(decrypted, {
+        type: 'text',
+        text: {
+          body:
+            `✅ *${provider === 'quickbooks' ? 'QuickBooks' : 'Stripe'} connected.*\n\n` +
+            `Your real financial data will sync shortly. Future answers will use your actual numbers instead of industry assumptions where available.`,
+        },
+      });
+    }
+  }
+
+  res.status(200).send(
+    '<html><body style="font-family:monospace;background:#0B0D10;color:#5EE6B0;padding:40px;text-align:center;">' +
+    '<h2>Connected ✓</h2><p style="color:#8B92A0;">You can close this window and return to WhatsApp.</p>' +
+    '</body></html>',
+  );
 });
 
 // ============================================================================
