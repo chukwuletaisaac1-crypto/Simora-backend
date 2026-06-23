@@ -551,6 +551,129 @@ function calculateConfidenceScore(ledgerMetrics: any, systemState: any): Confide
   return { score, grade, reasons };
 }
 
+// ============================================================================
+// ON-DEMAND UNIFIED.TO LEDGER SYNC (PHASE 6: REAL LEDGER SYNC)
+//
+// Design choice, per explicit decision: sync happens ON DEMAND, every time
+// the engine runs for a user who has a connection — not on a schedule.
+// This matches Unified.to's own architecture (real-time pass-through, no
+// caching on their end) — a scheduled poll would just reintroduce the
+// staleness their platform is built to avoid, and would burn API calls for
+// users who haven't messaged in weeks. The cost is paid only when value is
+// actually needed: right before the engine reasons about this user's data.
+//
+// This function is intentionally silent/non-fatal on every failure path —
+// a sync failure should never block the user from getting an answer. If
+// Unified.to is down, the engine falls back to whatever is already in
+// ledger_metrics (possibly stale, possibly null) exactly as it did before
+// this feature existed. The confidence scorer already accounts for missing
+// ledger fields, so a failed sync degrades gracefully into the same
+// "MEDIUM/LOW confidence, here's why" behavior rather than crashing.
+// ============================================================================
+async function syncLedgerFromUnified(userId: string, supabaseAdmin: SupabaseClient): Promise<void> {
+  const UNIFIED_API_KEY = process.env.UNIFIED_API_KEY;
+  if (!UNIFIED_API_KEY) {
+    // Not configured — silently skip. server.ts already logs a startup
+    // warning about this; no need to repeat it on every single message.
+    return;
+  }
+
+  const { data: connections, error: connErr } = await supabaseAdmin
+    .from('unified_connections')
+    .select('*')
+    .eq('user_id', userId)
+    .eq('is_active', true);
+
+  if (connErr) {
+    console.error(`[UNIFIED SYNC] ⚠️ Failed to fetch connections for user ${userId} (non-fatal):`, connErr.message);
+    return;
+  }
+
+  if (!connections || connections.length === 0) {
+    // No connection — this is the common case for most users. Not an
+    // error, just nothing to do.
+    return;
+  }
+
+  for (const connection of connections) {
+    try {
+      // 'report' is Unified.to's standardized financial report object,
+      // which surfaces profit & loss style data across both Stripe and
+      // QuickBooks without needing provider-specific parsing logic — this
+      // is exactly the normalization benefit of using a unified API rather
+      // than building separate Stripe and QuickBooks integrations.
+      const response = await fetch(
+        `https://api.unified.to/accounting/${connection.connection_id}/report`,
+        { headers: { Authorization: `Bearer ${UNIFIED_API_KEY}` } },
+      );
+
+      if (!response.ok) {
+        const errBody = await response.text();
+        console.error(
+          `[UNIFIED SYNC] ⚠️ Unified.to API returned ${response.status} for connection ${connection.connection_id} ` +
+          `(provider: ${connection.provider}, user: ${userId}): ${errBody}`,
+        );
+        continue; // Try the next connection if the user has more than one
+      }
+
+      const reportData = await response.json();
+
+      // NOTE: Unified.to's `report` object schema needs to be mapped to
+      // SIMORA's ledger_metrics columns (mrr, variable_cogs,
+      // fixed_operating_overhead, verified_cash_balance). The exact field
+      // names returned depend on the specific report type and provider —
+      // this mapping should be verified against a REAL response from your
+      // workspace before trusting it in production. The fields below are a
+      // reasonable first guess based on Unified.to's documented Report
+      // model, not a confirmed-correct mapping — flagging this explicitly
+      // rather than presenting it as certain.
+      const updatePayload: Record<string, any> = {
+        user_id: userId,
+        last_hydrated_by: connection.provider === 'stripe' ? 'UNIFIED_STRIPE_SYNC' : 'UNIFIED_QUICKBOOKS_SYNC',
+      };
+
+      // TODO: VERIFY — confirm these field paths against a real Unified.to
+      // /accounting/{connectionId}/report response in your workspace.
+      if (typeof reportData?.total_revenue === 'number') updatePayload.mrr = reportData.total_revenue;
+      if (typeof reportData?.total_cogs === 'number') updatePayload.variable_cogs = reportData.total_cogs;
+      if (typeof reportData?.total_operating_expenses === 'number') updatePayload.fixed_operating_overhead = reportData.total_operating_expenses;
+      if (typeof reportData?.cash_balance === 'number') updatePayload.verified_cash_balance = reportData.cash_balance;
+
+      // Only write if we actually got at least one real field — an empty
+      // sync (e.g. report schema didn't match our guessed field names)
+      // should not overwrite existing data with a payload that's just
+      // user_id and last_hydrated_by.
+      const gotRealData = Object.keys(updatePayload).length > 2;
+
+      if (gotRealData) {
+        const { error: upsertErr } = await supabaseAdmin
+          .from('ledger_metrics')
+          .upsert(updatePayload, { onConflict: 'user_id' });
+
+        if (upsertErr) {
+          console.error(`[UNIFIED SYNC] ⚠️ Failed to write synced data for user ${userId}:`, upsertErr.message);
+        } else {
+          console.log(`[UNIFIED SYNC] ✅ Synced ${connection.provider} data for user ${userId}`);
+          await supabaseAdmin
+            .from('unified_connections')
+            .update({ last_synced_at: new Date().toISOString() })
+            .eq('id', connection.id);
+        }
+      } else {
+        console.warn(
+          `[UNIFIED SYNC] ⚠️ Unified.to returned a report for user ${userId} but none of the expected fields ` +
+          `(total_revenue, total_cogs, total_operating_expenses, cash_balance) were present. The field-name ` +
+          `mapping above likely needs adjustment — check a real response payload from your workspace.`,
+        );
+      }
+    } catch (err: any) {
+      console.error(`[UNIFIED SYNC] ❌ Unexpected error syncing connection ${connection.connection_id}:`, err?.message || err);
+      // Continue to next connection rather than letting one failure stop
+      // sync for a user with multiple connected providers.
+    }
+  }
+}
+
 async function getPendingDecisionFollowup(userId: string, supabaseAdmin: SupabaseClient) {
   const { data, error } = await supabaseAdmin
     .from('decision_logs')
@@ -693,6 +816,43 @@ export async function executeSimoraCoreEngine(
 
   if (stateErr || !state) {
     throw new Error(`CRITICAL_SYSTEM_ERROR: System State Missing for User ${user.id}`);
+  }
+
+  // ── ON-DEMAND LIVE LEDGER SYNC ────────────────────────────────────────────
+  // Per explicit decision: sync happens HERE, on demand, right before this
+  // turn's reasoning — not on a schedule. Unified.to is a real-time
+  // pass-through with no caching on their end, so a scheduled poll would
+  // just reintroduce staleness their architecture is built to avoid, and
+  // would burn API calls for users who haven't messaged in weeks.
+  //
+  // 8-SECOND TIMEOUT (per explicit decision): syncLedgerFromUnified() makes
+  // a real network call to Unified.to, which itself proxies to Stripe/
+  // QuickBooks live — that round-trip can be slow. We race the sync against
+  // an 8-second timer so one slow external API call can never hang a
+  // WhatsApp reply. If the timeout wins, we proceed with whatever is
+  // already cached in ledger_metrics from a previous successful sync (or
+  // null if there's never been one) — exactly the same fallback behavior
+  // as if Unified.to had errored outright. This is a deliberate trade:
+  // we accept a potentially-stale read over a slow/blocked answer.
+  const SYNC_TIMEOUT_MS = 8000;
+  try {
+    await Promise.race([
+      syncLedgerFromUnified(user.id, supabaseAdmin),
+      new Promise<void>((resolve) => setTimeout(resolve, SYNC_TIMEOUT_MS)),
+    ]);
+    // NOTE: Promise.race does not cancel the loser — if the 8s timer wins,
+    // syncLedgerFromUnified() is still running in the background and may
+    // still successfully write to ledger_metrics a few seconds after this
+    // turn's reply has already been sent. That's a deliberate, harmless
+    // side effect: it means a slow sync doesn't help THIS answer, but it
+    // does warm the cache for the NEXT message, which is strictly better
+    // than not syncing at all.
+  } catch (syncRaceErr: any) {
+    // syncLedgerFromUnified() is already internally non-fatal on every path
+    // (see its own try/catch per-connection above) — this outer catch is a
+    // final safety net in case something genuinely unexpected throws, so a
+    // bug in the sync path can never take down the main reasoning flow.
+    console.error('[SIMORA ENGINE] ⚠️ Ledger sync race threw unexpectedly (non-fatal):', syncRaceErr?.message || syncRaceErr);
   }
 
   // ── BUG FIX: .single() throws when no ledger_metrics row exists yet for a
@@ -904,11 +1064,68 @@ Classify intent and output valid JSON following schema requirements. First, appl
     }
   }
 
-  // ── 8. UNIFIED HOSTED PORTAL LINK HANDSHAKE ──────────────────────────────
+  // ── 8. REAL LEDGER AUTH HANDOFF — direct Unified.to authorization URL ────
+  // CORRECTED DESIGN (superseding an earlier draft of this comment block):
+  // there is no need for an intermediate static page hosting a JS widget.
+  // Unified.to's own hosted authorization endpoint
+  // (api.unified.to/unified/integration/auth/{workspace}/{type}) can accept
+  // a `success_redirect` that points DIRECTLY at our own server's
+  // GET /api/v1/unified/callback route — confirmed against Unified.to's
+  // own docs (docs.unified.to/tutorials/customize-auth-flow): the `state`
+  // parameter is explicitly designed to carry an app's own user ID through
+  // the flow and return it unchanged on the redirect. Combined with
+  // `success_redirect`, Unified.to will redirect the user's browser
+  // straight to our server with both `id` (connection_id) and our state
+  // value attached as query params — no separate hosted page required.
+  //
+  // This eliminates the static `unified-auth.html` / `connect.html` design
+  // entirely. If either of those files exist in your project, they are now
+  // dead — the real flow never visits them.
+  //
+  // REQUIRED CONFIG (server-side env vars, read via process.env directly
+  // here since this is the only place they're needed):
+  //   UNIFIED_WORKSPACE_ID — from app.unified.to Settings > API Keys
+  //   SIMORA_PUBLIC_URL    — this server's own public Railway domain, used
+  //                          to build the success/failure redirect targets
   if (validatedOutput.type === 'CONNECT_LEDGER') {
-    const target = validatedOutput.integration_target;
-    const secureVaultUrl = `https://vault.unified.to/oauth2/connect?workspace=simora_prod&integration=${target}&state=${user.id}`;
-    validatedOutput.message = `🛡️ Secure link ready.\n👉 ${secureVaultUrl}\n_Sandboxed, encrypted at rest._`;
+    const UNIFIED_WORKSPACE_ID = process.env.UNIFIED_WORKSPACE_ID || '';
+    const SIMORA_PUBLIC_URL = process.env.SIMORA_PUBLIC_URL || '';
+
+    // Normalize whatever the model classified into one of the two providers
+    // this build actually supports (stripe, quickbooks). Anything else is
+    // passed through as-is — Unified.to will still attempt it if it's a
+    // real integration type in your workspace, but ledger_metrics sync
+    // (built in server.ts) only recognizes these two right now.
+    const rawTarget = (validatedOutput.integration_target || '').toLowerCase();
+    const normalizedProvider = rawTarget.includes('quickbook') ? 'quickbooksonline'
+      : rawTarget.includes('stripe') ? 'stripe'
+      : rawTarget;
+
+    if (!UNIFIED_WORKSPACE_ID || !SIMORA_PUBLIC_URL) {
+      // Fail visibly in the message itself rather than generating a URL
+      // that will silently 404 or misconfigure — the user deserves to know
+      // this isn't ready yet, not receive a broken link with no explanation.
+      validatedOutput.message =
+        '⚠️ Ledger sync isn\'t fully configured on our end yet — the team needs to finish setting up the connection. ' +
+        'Try again shortly, or contact support if this persists.';
+      console.error(
+        '[CONNECT_LEDGER] ❌ Cannot generate auth URL — UNIFIED_WORKSPACE_ID or SIMORA_PUBLIC_URL missing. ' +
+        'Set both in Railway environment variables.',
+      );
+    } else {
+      const callbackUrl = `${SIMORA_PUBLIC_URL}/api/v1/unified/callback`;
+      const redirectWithParams = `${callbackUrl}?uid=${encodeURIComponent(user.id)}&provider=${encodeURIComponent(normalizedProvider)}`;
+
+      const authUrl =
+        `https://api.unified.to/unified/integration/auth/${UNIFIED_WORKSPACE_ID}/${encodeURIComponent(normalizedProvider)}` +
+        `?redirect=1` +
+        `&env=Production` +
+        `&success_redirect=${encodeURIComponent(redirectWithParams)}` +
+        `&failure_redirect=${encodeURIComponent(redirectWithParams)}` +
+        `&state=${encodeURIComponent(user.id)}`;
+
+      validatedOutput.message = `🛡️ Secure connection link ready.\n👉 ${authUrl}\n_Opens in your browser — nothing is stored until you authorize._`;
+    }
   }
 
   // ── 9. BACKGROUND MEMORY LOGGER ───────────────────────────────────────────
