@@ -494,14 +494,65 @@ app.post('/api/v1/webhook/data-hydration', async (req: Request, res: Response) =
 // approach (see SUPABASE_SCHEMA_NOTE_unified_ledger_sync.md).
 // ============================================================================
 app.get('/api/v1/unified/callback', async (req: Request, res: Response) => {
-  const connectionId = req.query.id as string | undefined; // Unified.to appends this
-  const userId        = req.query.uid as string | undefined;
-  const provider       = (req.query.provider as string | undefined)?.toLowerCase();
+  const connectionId   = req.query.id as string | undefined;    // Unified.to appends this on SUCCESS
+  const userId          = req.query.uid as string | undefined;   // ours, round-tripped through the redirect
+  const provider         = (req.query.provider as string | undefined)?.toLowerCase(); // ours, round-tripped
+  const unifiedError    = req.query.error as string | undefined; // Unified.to appends THIS on FAILURE instead of `id`
 
-  console.log('[UNIFIED CALLBACK] Received:', JSON.stringify({ connectionId, userId, provider }));
+  console.log('[UNIFIED CALLBACK] Received:', JSON.stringify({ connectionId, userId, provider, unifiedError }));
 
+  // ── REAL PROVIDER-SIDE FAILURE (e.g. integration not enabled on this
+  // workspace) — Unified.to redirected correctly and told us WHY it
+  // failed. This is different from "the callback URL itself is malformed"
+  // below: here, uid/provider are present, but Unified.to never issued a
+  // connection_id because something on ITS side rejected the request
+  // (wrong workspace config, integration not activated, user declined,
+  // etc). Surface the real reason instead of a generic message — this is
+  // exactly the gap that turned a 1-config-toggle fix into a multi-step
+  // debugging session the first time this happened.
+  if (unifiedError && userId) {
+    const decodedError = decodeURIComponent(unifiedError);
+    console.error(`[UNIFIED CALLBACK] ❌ Unified.to reported a failure for user ${userId} (provider: ${provider}): ${decodedError}`);
+
+    // Notify the user on WhatsApp with the REAL reason, not a vague retry
+    // prompt — if it's a workspace config issue, no amount of retrying
+    // the link will fix it, so telling them to "try again" would be
+    // actively misleading.
+    const { data: userRow } = await supabaseAdmin
+      .from('users')
+      .select('whatsapp_number_encrypted')
+      .eq('id', userId)
+      .single();
+
+    if (userRow?.whatsapp_number_encrypted) {
+      const decrypted = decryptPhoneNumber(userRow.whatsapp_number_encrypted);
+      if (decrypted) {
+        await sendWhatsApp(decrypted, {
+          type: 'text',
+          text: {
+            body:
+              `⚠️ *${provider === 'quickbooksonline' ? 'QuickBooks' : 'Stripe'} connection failed.*\n\n` +
+              `Reason: ${decodedError}\n\n` +
+              `This may need a fix on our end rather than a retry — we've logged it.`,
+          },
+        });
+      }
+    }
+
+    res.status(200).send(
+      '<html><body style="font-family:monospace;background:#0B0D10;color:#E25A5A;padding:40px;">' +
+      `<h2>Connection failed</h2><p style="color:#8B92A0;">${decodedError}</p>` +
+      '<p style="color:#8B92A0;">You can close this window — we\'ve been notified.</p>' +
+      '</body></html>',
+    );
+    return;
+  }
+
+  // ── GENUINELY MALFORMED CALLBACK — neither a connection_id NOR an error
+  // came through. This is the actual "something is wrong with the redirect
+  // URL itself" case, distinct from the provider-side failure handled above.
   if (!connectionId || !userId || !provider) {
-    console.error('[UNIFIED CALLBACK] ❌ Missing required query params.');
+    console.error('[UNIFIED CALLBACK] ❌ Missing required query params (no connection_id AND no error from Unified.to).');
     res.status(400).send(
       '<html><body style="font-family:monospace;background:#0B0D10;color:#E25A5A;padding:40px;">' +
       'Connection failed — missing required information. Please try the link from WhatsApp again.' +
